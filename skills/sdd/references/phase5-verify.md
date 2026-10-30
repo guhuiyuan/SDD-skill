@@ -81,8 +81,9 @@ AI 给出**建议结论 + 依据**,人决定最终结论。不要自己宣布通
    有错误就修报告或补验证,不要带着错提交。
 3. **AskUserQuestion 确认后** git commit 验收报告:
    `docs(spec): 完成 <feature> 验收报告 v1.0`
-4. 打 tag:`git tag -a v1.0 -m "<feature> 首版完成"`
-5. 更新 `proposal.md` §0 版本号为 `v1.0`,在 changelog 记录
+4. 打 tag:`git tag -a v1.0-<feature> -m "<feature> 首版完成"`
+   (带 feature 名,多 feature 的仓库不会撞 tag)
+5. 更新**三份文档**的 §0 版本号为 `v1.0`(三份始终保持一致),在 changelog 记录
 6. 若有未达标 AC:在 `tasks.md` 里新增补做 Task(或走逆向修改流程调整规范),不要留着不说
 
 ## 常见坑

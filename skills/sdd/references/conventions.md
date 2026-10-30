@@ -9,7 +9,8 @@
 | `AC-F-xxx` | 功能验收标准 | proposal §3.1 |
 | `AC-P-xxx` | 性能验收标准 | proposal §3.2 |
 | `AC-E-xxx` | 边界场景验收标准 | proposal §3.3 |
-| `ASM-xxx` | 假设 / 开放问题 | proposal §5、design §5 |
+| `ASM-xxx` | 假设(已先这么定,design 直接承接) | proposal §5、design §5 |
+| `OQ-xxx` | 开放问题(还没定,需人拍板) | proposal §5、design §5 |
 | `ADR-xxx` | 架构决策记录 | design §2 |
 | `TASK-xxx` | 任务 | tasks §1 |
 
@@ -26,7 +27,10 @@
 | `v1.x` | 增量 | 新增功能 / 修复,向后兼容 |
 | `v2.0` | 不兼容变更 | 破坏性变更,需用户明确确认 |
 
-版本号写在 `proposal.md` §0 与 `tasks.md` §0 两处,保持一致。
+版本号写在**三份文档各自的 §0 元信息**表里,**三份始终保持一致**,代表该 feature
+的当前版本。改了版本号要三份一起改,否则读者会看到 proposal 是 v1.0 而 design 还是 v0.5。
+
+§0 元信息表在每份文档的开头,包含:项目(feature 名)、版本、状态、日期、关联文档。
 
 ## ADR 规则
 
@@ -72,6 +76,9 @@ ADR 结构:
 - **AC-F-001**: 给定...,系统 SHALL ... <!-- REMOVED -->    本轮移除
 ```
 
+> 写文档里的**示例**时,编号用 `AC-F-NNN` 这种不匹配真实格式的占位——否则示例会被
+> 校验器当成真的验收标准,报出「编号重复」和幻影 AC。
+
 规则:
 
 | 标记 | 含义 | 处理方式 |
@@ -91,6 +98,18 @@ REMOVED 不删原文,理由与 ADR 一样——编号是追溯锚点,删掉会�
 
 `export_openspec.py` 会把带 delta 的 AC 导出成 OpenSpec 的
 `## ADDED Requirements` / `## MODIFIED Requirements` / `## REMOVED Requirements` 三段结构。
+
+## 假设与开放问题
+
+proposal §5 分两类,编号前缀不同,下游处理方式也不同:
+
+| 前缀 | 含义 | design 阶段怎么处理 |
+|---|---|---|
+| `ASM-xxx` | 假设——先这么定了,design 直接承接 | 在 design §5 写明"前提 + 不成立时的退化方案" |
+| `OQ-xxx` | 开放问题——还没定,需要人拍板 | **必须先解决**,解决不了就写进退化方案 |
+
+分开编号的意义在于:design 读到 `OQ-xxx` 时知道"这件事还没定,不能直接往下推",
+读到 `ASM-xxx` 时知道"按这个前提设计,并写好退路"。
 
 ## 追溯矩阵
 

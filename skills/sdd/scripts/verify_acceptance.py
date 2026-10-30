@@ -37,6 +37,12 @@ AC_RE = re.compile(r'(?<![A-Za-z0-9])(AC-([FPE])-(\d{3}))(?![0-9])')
 NUMBER_RE = re.compile(r'^(\d+(?:\.\d+)*)\.?\s+(.*)$')
 HEADING_RE = re.compile(r'^(#{1,6})\s+(.*?)\s*$')
 TASK_HEADING_RE = re.compile(r'^#{2,4}\s*(?:\[([ xX])\]\s*)?(TASK-\d{3})\s*[:：]?\s*(.*)$')
+COMMENT_RE = re.compile(r'<!--.*?-->', re.S)
+
+
+def strip_comments(text):
+    """去掉 HTML 注释。说明性注释里会写示例编号,不去掉会被当成真的验收标准。"""
+    return COMMENT_RE.sub(' ', text)
 
 
 class Report(object):
@@ -193,7 +199,7 @@ def main(argv=None):
 
     # proposal 的 AC 清单
     acs = []
-    for m in AC_RE.finditer(re.sub(r'<!--.*?-->', '', proposal_text)):
+    for m in AC_RE.finditer(strip_comments(proposal_text)):
         if m.group(1) not in acs:
             acs.append(m.group(1))
     perf_acs = [a for a in acs if a.startswith('AC-P-')]
@@ -249,6 +255,10 @@ def main(argv=None):
             continue
         covered = ac_to_tasks.get(ac) or set()
         if not covered:
+            # 追溯链在这里断了:报告说通过了,但找不到任何 Task 覆盖它,
+            # 无从确认它是否真的被实现过——不能当成没事跳过
+            report.error(where, '%s 标为通过,但 tasks.md 的追溯矩阵里找不到覆盖它的 Task,'
+                              '无法确认它是否真的被实现' % ac)
             continue
         not_done = sorted(t for t in covered if t not in done_tasks)
         if not_done:

@@ -1,11 +1,16 @@
 ---
 name: sdd
 description: |
-  规范驱动开发(SDD)助手:引导用户产出并维护 proposal.md / design.md / tasks.md 三份规范文档,
-  再按规范执行代码生成与整体验收。当用户提到"写规范""SDD""spec""需求""proposal""范围"
-  "验收标准""架构""design""ADR""技术选型""模块划分""接口""任务拆解""tasks""实现"
-  "按规范写代码""验收""交付""spec-driven""规范驱动""给老项目补规范"时触发。当用户描述了
-  一个新功能或新项目的意图、并希望先有文档再写代码时,即使没有提到 SDD,也应主动使用本技能。
+  规范驱动开发(SDD)助手:把需求、架构、任务拆成三份可评审的规范文档
+  (proposal.md / design.md / tasks.md),再按规范执行代码生成与整体验收。
+  当用户要"先写规范再写代码"时使用——整理需求、写需求、划范围、定验收标准、
+  定架构、做技术选型、写 ADR、划模块、设计接口、拆任务、排期、
+  按规范实现、照规范写代码、验收、交付、给老项目补规范;也支持直接 /sdd 开始。
+  产出固定放在项目根的 specs/<feature>/ 下(三份文档)+ acceptance-report.md,
+  辅助脚本在 ~/.claude/skills/sdd/scripts/(init_specs / validate_specs /
+  update_claude_md / verify_acceptance / export_openspec)。
+  仅在项目已启用 SDD(项目 CLAUDE.md 含 SDD 规范区块,或 specs/ 下已有规范目录),
+  或用户明确要求走规范流程时使用;普通编码请求不要触发。
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash, AskUserQuestion, Task, Agent
 ---
 
@@ -35,6 +40,19 @@ SDD 把这三件事外化成三份可评审、可版本化、可 diff 的文档:
    规范的修改留下 diff,代码的修改能追溯到具体的 Task。
 4. **流程不是死的** —— 五个阶段可以单独进入,也可以中途改主意。
 
+## 项目根与 feature 名
+
+规范和 CLAUDE.md 都必须落在**项目根**下,不能落在当前工作目录的偶然位置——
+否则脚本找不到文件、路径写进提交历史后也无法追溯。
+
+- **项目根**:用户当前工作目录;若它在 git 仓库内,取仓库根
+  (`git rev-parse --show-toplevel`)。所有脚本都显式传 `--root <项目根>`,
+  不要依赖默认的当前目录。
+- **feature 名**:`specs/` 下的目录名,kebab-case 小写(如 `user-auth`、`ticket-system`)。
+  一个 feature 一个目录,内含三份规范文档。
+- **先跟用户确认 feature 名再动手**:这个名字会进 commit message、git tag 和
+  CLAUDE.md 里的路径,事后改名要连带改一堆引用。
+
 ## 五阶段与三份文档
 
 | 阶段 | 产出 | 版本节点 | 详细流程 |
@@ -54,13 +72,25 @@ SDD 把这三件事外化成三份可评审、可版本化、可 diff 的文档:
 
 ### a. 看项目状态
 
-扫描 `specs/*/`:
+**先跑校验器问它当前在哪个阶段**——不要只看文件在不在。骨架文件也存在,但内容没填,
+那时候应该回到该文档对应的阶段,而不是跳到 Phase 4 去写代码。
 
-- 没有 `proposal.md` → Phase 1
-- 有 proposal 没 design → Phase 2
-- 有 design 没 tasks → Phase 3
-- 有 tasks 且有未勾选 Task → Phase 4
-- 全部勾选 → Phase 5
+```bash
+python <skill目录>/scripts/validate_specs.py --feature <feature> --phase
+```
+
+输出形如:
+
+```
+当前阶段:Phase 1 — 定义需求
+  阻塞项 29 条,先修这些再往下走:
+    - 第 16 行仍有未填写的占位符 …
+```
+
+判据是**内容完成度**:哪份文档还有错误就回到哪一阶段;三份都干净了,再看 Task 勾选进度
+决定是 Phase 4(还有未完成的 Task)还是 Phase 5(全部完成)。
+
+没有 `specs/` 目录 → Phase 1(先和用户确认 feature 名)。
 
 ### b. 按用户意图的语义推断
 

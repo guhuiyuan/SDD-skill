@@ -18,5 +18,6 @@
 2. 每个 Task 完成前必须跑通其「验证命令」；未通过不得推进到下游 Task。
 3. 不得擅自增加 `proposal.md` §2.1 之外的功能；需要新增时先改规范。
 4. 发现规范与实现冲突时，先停下并提出规范修改方案，经确认后再改代码。
-5. 提交前跑 `scripts/validate_specs.py`（规范类）或该 Task 的验证命令（代码类）。
+5. 提交前跑 `~/.claude/skills/sdd/scripts/validate_specs.py --feature <feature>`
+   （规范类）或该 Task 的验证命令（代码类）。
 <!-- SDD:END -->

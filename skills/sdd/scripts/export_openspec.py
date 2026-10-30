@@ -39,6 +39,24 @@ for _stream in ('stdout', 'stderr'):
 AC_RE = re.compile(r'(?<![A-Za-z0-9])(AC-([FPE])-(\d{3}))(?![0-9])')
 DELTA_RE = re.compile(r'<!--\s*(ADDED|MODIFIED|REMOVED)\s*-->')
 TASK_HEADING_RE = re.compile(r'^#{2,4}\s*(?:\[([ xX])\]\s*)?(TASK-\d{3})\s*[:：]?\s*(.*)$')
+COMMENT_RE = re.compile(r'<!--.*?-->', re.S)
+
+
+def strip_comments(text):
+    """去掉 HTML 注释,但保留 delta 标记(它们本身也是注释)。
+
+    必须去注释:文档的说明性注释里会写示例编号,不去掉的话示例会被导出成
+    真的 OpenSpec Requirement。delta 标记要保留,先替换成 token 再剥注释。
+    """
+    protected = []
+
+    def protect(m):
+        protected.append(m.group(0))
+        return '\x00D%d\x00' % (len(protected) - 1)
+
+    text = DELTA_RE.sub(protect, text)
+    text = COMMENT_RE.sub(' ', text)
+    return re.sub(r'\x00D(\d+)\x00', lambda m: protected[int(m.group(1))], text)
 
 GIVEN_RE = re.compile(
     r'给定\s*(?P<given>[^,，]+?)\s*[,，]\s*当\s*(?P<when>[^,，]+?)\s*时\s*[,，]?\s*'
@@ -65,6 +83,7 @@ def write(path, content):
 def parse_acs(text):
     """解析 proposal 的验收标准,返回 [{id, kind, desc, delta}] 。"""
     out = []
+    text = strip_comments(text)
     for line in text.splitlines():
         m = AC_RE.search(line)
         if not m:

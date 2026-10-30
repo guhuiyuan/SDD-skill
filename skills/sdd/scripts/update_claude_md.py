@@ -38,6 +38,12 @@ RULE_BLOCK_RE = re.compile(
 AC_RE = re.compile(r'(?<![A-Za-z0-9])(AC-[FPE]-\d{3})(?![0-9])')
 ADR_RE = re.compile(r'(?<![A-Za-z0-9])(ADR-\d{3})(?![0-9])')
 TASK_RE = re.compile(r'(?<![A-Za-z0-9])(TASK-\d{3})(?![0-9])')
+COMMENT_RE = re.compile(r'<!--.*?-->', re.S)
+
+
+def strip_comments(text):
+    """去掉 HTML 注释。文档的说明性注释里会写示例编号,不去掉会被当成真实条目。"""
+    return COMMENT_RE.sub(' ', text)
 # Task 标题两种写法: `### TASK-001: 标题`(待办) / `### [x] TASK-001: 标题`(已完成)
 TASK_HEADING_RE = re.compile(r'^#{2,4}\s*(?:\[([ xX])\]\s*)?(TASK-\d{3})\s*[:：]?\s*(.*)$')
 
@@ -103,8 +109,8 @@ def build_block(root, feature, features=None):
         p_ver = meta_value(p_text, '版本') or '—'
         d_ver = meta_value(d_text, '版本') or '—'
         t_ver = meta_value(t_text, '版本') or '—'
-        ac_count = len(set(AC_RE.findall(p_text)))
-        adr_count = len(set(ADR_RE.findall(d_text)))
+        ac_count = len(set(AC_RE.findall(strip_comments(p_text))))
+        adr_count = len(set(ADR_RE.findall(strip_comments(d_text))))
         tasks = parse_tasks(t_text)
         done = sum(1 for _tid, d, _t in tasks if d)
         total_tasks += len(tasks)
@@ -162,7 +168,8 @@ def build_block(root, feature, features=None):
     lines.append('2. 每个 Task 完成前必须跑通其「验证命令」；未通过不得推进到下游 Task。')
     lines.append('3. 不得擅自增加 `proposal.md` §2.1 之外的功能；需要新增时先改规范。')
     lines.append('4. 发现规范与实现冲突时，先停下并提出规范修改方案，经确认后再改代码。')
-    lines.append('5. 提交前跑 `scripts/validate_specs.py`（规范类）或该 Task 的验证命令（代码类）。')
+    lines.append('5. 提交前跑 `~/.claude/skills/sdd/scripts/validate_specs.py --feature <feature>`')
+    lines.append('   （规范类）或该 Task 的验证命令（代码类）。')
     lines.append(END)
     return '\n'.join(lines)
 

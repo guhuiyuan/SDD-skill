@@ -40,19 +40,33 @@ ADR_RE = re.compile(r'^ADR-(\d{3})\s*[:：]\s*(.*)$')
 TASK_RE = re.compile(r'^(?:\[(?:[ xX])\]\s*)?TASK-(\d{3})\s*[:：]?\s*(.*)$')
 # 占位符形如 <...>;HTML 注释(<!-- MODIFIED --> 等 delta 标记)不算占位符
 PLACEHOLDER_RE = re.compile(r'<(?!!--)[^<>\n]{1,120}>')
+COMMENT_RE = re.compile(r'<!--.*?-->', re.S)
+DELTA_COMMENT_RE = re.compile(r'<!--\s*(ADDED|MODIFIED|REMOVED)\s*-->', re.I)
 # 形如 <...> 的占位符;排除少量 HTML 标签
 HTML_TAG_RE = re.compile(
     r'^</?(br|hr|img|a|p|div|span|code|pre|b|i|em|strong|td|th|tr|table|ul|ol|li|'
     r'input|link|meta|!--|font|center|small|sup|sub)[^<>]*>$', re.I)
 
-OBSERVABLE_HINTS = (
-    '返回', '响应', '输出', '显示', '提示', '状态码', '日志', '耗时', '延迟', '拒绝',
-    '成功', '失败', '保持', '等于', '不超过', '不小于', '不少于', '小于', '大于',
-    '创建', '删除', '更新', '发送', '存储', '记录', '包含', '为空', '非空', '报错',
-    '中断', '恢复', '一致', '不变', '阻塞', '超时', '重试', '降级', '状态', '不发生',
-    'http', '错误码', '告警', '无残留', '不超', '丢失', '出现', '触发', '生效',
-    '拒绝', '拒绝', '跳转', '渲染', '展示', '保留', '清除', '重置', '递增', '递减',
+# 「可二值判定」的判定采用**黑名单**制:默认认为可观测,只在明确出现模糊措辞时才判为不可观测。
+# 白名单制会误伤大量正常写法(如「校验通过并签发会话令牌」),代价是逼用户去改自己的验收标准——
+# 误判一个合格 AC 的代价远大于放过一个模糊 AC。
+VAGUE_HINTS = (
+    '表现良好', '正常工作', '正确工作', '工作正常', '运行正常', '性能良好', '体验良好',
+    '友好', '快速', '迅速', '及时', '合适', '妥善', '合理', '优雅', '无缝', '良好',
+    '尽量', '尽可能', '正确', '稳定可靠', '可靠性好', '体验好', '流畅', '清晰',
 )
+# 出现模糊措辞时,若同时有这些具体信号,仍算可观测
+CONCRETE_HINTS = (
+    '状态码', 'http', '错误码', '字段', '日志', '返回值', '数量', '响应体',
+    '错误信息', '提示信息', '记录数', '字节', '毫秒', '秒',
+)
+# 「可量化」的信号:数字 + 单位,或比较关系。不能只看有没有数字——
+# 版本号、ID、条目编号里的数字会让无关的比较误判为可量化。
+MEASURE_RE = re.compile(
+    r'\d+\s*(?:ms|msec|sec|s\b|秒|分钟|小时|天|%|‰|次|条|个|万|亿|MB|GB|KB|TB|'
+    r'QPS|RPS|req/s|并发)', re.I)
+COMPARE_RE = re.compile(
+    r'(<=|>=|<|>|≤|≥|不超过|不少于|小于|大于|低于|高于|以内|以上|以下|至少|最多|达到|等于)')
 
 # AC 里表示「期望结果」的标记,取最后一个标记之后的部分做可观测性判断
 RESULT_MARKERS = ('SHALL', 'MUST', 'SHOULD', '应当', '应该', '必须')
@@ -147,7 +161,25 @@ def section_lines(lines, heading):
 
 
 def strip_placeholders(text):
-    """移除 <...> 占位符,避免模板里的示例 AC/TASK 被当成真实条目。"""
+    """移除 HTML 注释(保留 delta 标记)与 <...> 占位符。
+
+    必须移除注释:模板的说明注释里会写示例 AC(如 `- **AC-F-001**: ...`),
+    不移除的话校验器会把示例当成真条目,报出「编号重复」这类假错误。
+
+    delta 标记本身也是 HTML 注释,必须保留。而 HTML 注释不能嵌套——模板的说明注释
+    里就写着 `<!-- ADDED -->` 这样的示例。所以顺序是:先把 delta 标记替换成占位 token,
+    再剥注释,最后把 token 还原。
+    """
+    protected = []
+
+    def protect(m):
+        protected.append(m.group(0))
+        return '\x00D%d\x00' % (len(protected) - 1)
+
+    text = DELTA_COMMENT_RE.sub(protect, text)
+    text = COMMENT_RE.sub(' ', text)
+    text = re.sub(r'\x00D(\d+)\x00',
+                  lambda m: protected[int(m.group(1))], text)
     return PLACEHOLDER_RE.sub(' ', text)
 
 
@@ -276,11 +308,13 @@ def expected_result(desc):
 
 
 def looks_observable(text):
-    """判断一段文字是否是可观测、可二值判定的结果。"""
-    if re.search(r'\d', text):
-        return True
+    """判断一段 AC 的期望结果是否可二值判定。默认宽松,只拦明确模糊的写法。"""
     low = text.lower()
-    return any(h in low for h in OBSERVABLE_HINTS)
+    measurable = bool(MEASURE_RE.search(low)) or \
+        bool(COMPARE_RE.search(low) and re.search(r'\d', low))
+    if any(v in low for v in VAGUE_HINTS):
+        return measurable or any(c in low for c in CONCRETE_HINTS)
+    return True
 
 
 def find_cycle(graph):
@@ -391,7 +425,7 @@ def validate_proposal(path, report):
         line = find_ac_line(clean, ac_id)
         if line is None:
             continue
-        desc = re.sub(r'^\**AC-[FPE]-\d{3}\**\s*[:：]?\s*', '', line).strip()
+        desc = re.sub(r'^\s*[-*+]?\s*\**AC-[FPE]-\d{3}\**\s*[:：]?\s*', '', line).strip()
         if not desc:
             report.error(where, '验收标准 %s 缺少描述' % ac_id)
             continue
@@ -426,11 +460,11 @@ def validate_proposal(path, report):
             if term and term not in body:
                 report.warn(where, '术语「%s」在正文 §1-§3 中未出现,要么用起来要么删掉' % term)
 
-    # 假设
+    # 假设与开放问题
     asms = []
     if '5' in secs:
         for b in collect_bullets(section_lines(lines, secs['5'])):
-            m = re.search(r'(ASM-\d{3})', b)
+            m = re.search(r'(ASM-\d{3}|OQ-\d{3})', b)
             if m:
                 asms.append(m.group(1))
 
@@ -550,18 +584,28 @@ def validate_design(path, report, proposal):
                 extra = '(本轮标记为 %s,新增需求尚未落到设计)' % tag if tag == 'ADDED' else ''
                 report.error(where, '§6 追溯矩阵未覆盖 %s%s' % (ac, extra))
 
-    # §5 假设表
+    # §5 假设与开放问题表
     if '5' in secs and proposal.get('asms'):
         tables = parse_tables(section_lines(lines, secs['5']))
         t = tables[0] if tables else None
         got = set()
         if t:
             for row in t['rows']:
-                cell_text_ = cell_text(row)
-                got.update(re.findall(r'ASM-\d{3}', cell_text_))
+                cell_text_ = strip_placeholders(cell_text(row))
+                got.update(re.findall(r'(?:ASM|OQ)-\d{3}', cell_text_))
         for asm in proposal['asms']:
-            if asm not in got:
-                report.warn(where, '§5 未承接 proposal 的假设 %s' % asm)
+            if asm in got:
+                continue
+            if asm.startswith('OQ'):
+                # 开放问题还没解决就不该往下推设计——这是错误,不是提醒
+                report.error(where, '§5 未承接 proposal 的 %s——开放问题必须先解决'
+                                   '或写明退化方案,才能进入实现阶段' % asm)
+            else:
+                report.warn(where, '§5 未承接 proposal 的 %s——'
+                                   '假设要么写进设计,要么标注为未解决风险' % asm)
+        # 反向:design 里引用了 proposal 中不存在的编号,多半是改了 proposal 却没同步
+        for stale in sorted(got - set(proposal['asms'])):
+            report.warn(where, '§5 引用了 proposal 里没有的 %s,确认是否漏同步' % stale)
 
     for line_no, token in find_placeholders(text):
         report.error(where, '第 %d 行仍有未填写的占位符 %s' % (line_no, token))
@@ -584,16 +628,21 @@ def validate_tasks(path, report, proposal):
 
     if '1' not in secs:
         report.error(where, '缺少必需章节 §1 任务列表')
-    for num, label in (('2', '依赖关系图'), ('3', '推荐执行顺序'), ('4', '追溯矩阵')):
+    for num, label in (('2', '依赖关系图'), ('3', '推荐执行顺序')):
         if num not in secs:
             report.warn(where, '建议补充 §%s %s' % (num, label))
+    if '4' not in secs and proposal.get('acs'):
+        # 追溯链断在这里会让下游的交叉验证全部失效(阶段 5 的"Task 没做完却宣布通过"
+        # 就查不出来了),所以这不是建议,是硬要求
+        report.error(where, '缺少 §4 追溯矩阵——每条 AC 必须能指到覆盖它的 Task')
 
     # Task 段落
     tasks = []
     for h in headings:
         m = TASK_RE.match(h['title'])
         if m:
-            tasks.append({'num': int(m.group(1)), 'title': m.group(2).strip(), 'heading': h})
+            tasks.append({'num': int(m.group(1)), 'title': m.group(2).strip(), 'heading': h,
+                          'done': h['title'].lstrip().lower().startswith('[x]')})
     if not tasks:
         report.error(where, '§1 没有发现任何 Task(格式: ### TASK-001: 动词开头的标题)')
 
@@ -622,11 +671,18 @@ def validate_tasks(path, report, proposal):
                              '「配置…」这类动宾结构' % (tid, title[:30]))
 
         for field in ('描述', '输入', '输出', '验收标准', '依赖', '验证命令'):
-            val = field_value(tree,field)
+            val = field_value(tree, field)
             if val is None or not val.strip():
                 report.error(where, '%s 缺少「%s」' % (tid, field))
 
-        cmd = field_value(tree,'验证命令')
+        # 标成完成的 Task 必须留下验证证据,否则「完成」只是声明不是事实
+        if t['done']:
+            vr = field_value(tree, '验证结果')
+            if vr is None or not vr.strip():
+                report.error(where, '%s 已标记 [x] 完成,但没有记录「验证结果」'
+                                  '(跑通的命令 + 关键输出)' % tid)
+
+        cmd = field_value(tree, '验证命令')
         if cmd:
             cmd = cmd.strip().strip('`')
             if not cmd or len(cmd) < 3:
@@ -635,7 +691,7 @@ def validate_tasks(path, report, proposal):
                 report.warn(where, '%s 的验证命令「%s」看起来不像可执行命令' % (tid, cmd))
 
         deps = set()
-        dep_field = field_value(tree,'依赖') or ''
+        dep_field = field_value(tree, '依赖') or ''
         for m in re.finditer(r'TASK-(\d{3})', dep_field):
             deps.add(int(m.group(1)))
         for d in sorted(deps):
@@ -718,12 +774,42 @@ def analyze_delta_impact(report, feature, proposal, design, tasks):
                         % (ac_id, tag))
 
 
+PHASE_BY_DOC = (
+    ('proposal.md', 1, 'Phase 1 — 定义需求'),
+    ('design.md', 2, 'Phase 2 — 架构设计'),
+    ('tasks.md', 3, 'Phase 3 — 任务拆解'),
+)
+
+
+def detect_phase(root, feature, report, tasks_result):
+    """判断当前应处于哪个阶段。
+
+    不能只看文件在不在——骨架文件也存在,但内容没填,那时候应该回到该文档对应的阶段,
+    而不是跳到 Phase 4 开始写代码。判据是**内容完成度**:哪份文档还有错误,就回到哪一阶段。
+    """
+    errs_by_doc = {}
+    for item in report.errors:
+        errs_by_doc.setdefault(item['where'], []).append(item['message'])
+    for fname, num, label in PHASE_BY_DOC:
+        if errs_by_doc.get(fname):
+            return num, label, errs_by_doc[fname]
+    total = len(tasks_result.get('tasks') or [])
+    done = tasks_result.get('done', 0)
+    if total == 0:
+        return 3, 'Phase 3 — 任务拆解', []
+    if done < total:
+        return 4, 'Phase 4 — 代码生成', []
+    return 5, 'Phase 5 — 验证与交付', []
+
+
 def validate_feature(root, feature, report):
     base = os.path.join(root, 'specs', feature)
     proposal = validate_proposal(os.path.join(base, 'proposal.md'), report)
     design = validate_design(os.path.join(base, 'design.md'), report, proposal)
     tasks = validate_tasks(os.path.join(base, 'tasks.md'), report, proposal)
     analyze_delta_impact(report, feature, proposal, design, tasks)
+    num, label, blockers = detect_phase(root, feature, report, tasks)
+    return {'phase': num, 'phase_label': label, 'blockers': blockers}
 
 
 def main(argv=None):
@@ -732,6 +818,8 @@ def main(argv=None):
     ap.add_argument('--root', default='.', help='项目根目录(默认当前目录)')
     ap.add_argument('--json', action='store_true', help='以 JSON 输出')
     ap.add_argument('--quiet', action='store_true', help='只输出错误')
+    ap.add_argument('--phase', action='store_true',
+                    help='输出当前应处于的阶段(基于内容完成度,不是文件是否存在)')
     args = ap.parse_args(argv)
 
     root = os.path.abspath(args.root)
@@ -750,8 +838,9 @@ def main(argv=None):
         return 2
 
     report = Report()
+    phases = {}
     for feat in features:
-        validate_feature(root, feat, report)
+        phases[feat] = validate_feature(root, feat, report)
 
     errors = report.errors
     warnings = report.warnings
@@ -760,6 +849,7 @@ def main(argv=None):
         print(json.dumps({
             'root': root,
             'features': features,
+            'phases': phases,
             'errors': errors,
             'warnings': warnings,
             'passed': not errors,
@@ -767,7 +857,14 @@ def main(argv=None):
     else:
         for feat in features:
             print('=== specs/%s ===' % feat)
-        print('')
+            ph = phases.get(feat) or {}
+            if args.phase:
+                print('当前阶段:%s' % ph.get('phase_label', '?'))
+                if ph.get('blockers'):
+                    print('  阻塞项 %d 条,先修这些再往下走:' % len(ph['blockers']))
+                    for b in ph['blockers'][:5]:
+                        print('    - %s' % b)
+                print('')
         for item in errors:
             print('[错误] %s: %s' % (item['where'], item['message']))
         for item in warnings:
