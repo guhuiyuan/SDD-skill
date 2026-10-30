@@ -1,0 +1,19 @@
+{
+  "name": "sdd",
+  "version": "0.1.0",
+  "description": "规范驱动开发(SDD)技能:引导产出 proposal.md / design.md / tasks.md 三份规范文档,并按规范执行代码生成与整体验收",
+  "author": {
+    "name": "SDD Skill contributors"
+  },
+  "license": "MIT",
+  "keywords": [
+    "sdd",
+    "spec-driven-development",
+    "specification",
+    "proposal",
+    "design",
+    "tasks",
+    "workflow"
+  ],
+  "skills": "./skills"
+}
