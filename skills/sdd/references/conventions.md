@@ -59,6 +59,39 @@ ADR 结构:
 **原文保留**,只改状态行,并在新的 ADR 里写明取代原因。不要删除、不要改写历史条目——
 历史决策记录了当时的约束和认知,删掉它就没人能解释代码为什么长这样。
 
+## Delta 变更语义
+
+规范不是一次性写完的。每一轮修订都要说清**这一轮变了什么**,否则多 feature 并行时
+没人说得清某个 AC 到底是新加的、改过的,还是一直都在。
+
+在条目**行尾**加 delta 标记,使用 OpenSpec 的同名关键字:
+
+```markdown
+- **AC-F-003**: 给定...,系统 SHALL ... <!-- ADDED -->      本轮新增
+- **AC-F-002**: 给定...,系统 SHALL ... <!-- MODIFIED -->   本轮修改
+- **AC-F-001**: 给定...,系统 SHALL ... <!-- REMOVED -->    本轮移除
+```
+
+规则:
+
+| 标记 | 含义 | 处理方式 |
+|---|---|---|
+| `ADDED` | 本轮新增的验收标准 | 必须同步补 design §6 追溯条目与 tasks §4 的 Task,否则校验报错 |
+| `MODIFIED` | 本轮修改的验收标准 | 校验器会列出下游受影响的设计条目与 Task,提示复核 |
+| `REMOVED` | 本轮移除的验收标准 | **原文保留**,只加标记;同时清理 design/tasks 中对它的引用 |
+
+REMOVED 不删原文,理由与 ADR 一样——编号是追溯锚点,删掉会让历史引用失效。
+
+`validate_specs.py` 会基于 delta 算出影响面:
+
+```
+[警告] specs/user-auth: AC-F-002 标记为 MODIFIED,下游需复核 → design §3.2 `auth.issueToken`; tasks TASK-003
+[错误] specs/user-auth: §4 追溯矩阵未覆盖 AC-F-003(本轮标记为 ADDED,新增需求尚未拆成 Task)
+```
+
+`export_openspec.py` 会把带 delta 的 AC 导出成 OpenSpec 的
+`## ADDED Requirements` / `## MODIFIED Requirements` / `## REMOVED Requirements` 三段结构。
+
 ## 追溯矩阵
 
 规范的价值在于可追溯。链条是:

@@ -49,7 +49,13 @@
 
 <!-- 每条 AC 唯一编号,格式见 references/conventions.md。
      写法:给定 X,当 Y 时,系统 SHALL Z(可观测结果)。
-     必须能落成一个自动测试用例:有明确输入 + 可观测结果 + 二值判定。 -->
+     必须能落成一个自动测试用例:有明确输入 + 可观测结果 + 二值判定。
+
+     修订已有规范时,在条目行尾加 delta 标记(OpenSpec 同名关键字):
+       - **AC-F-003**: ... <!-- ADDED -->     本轮新增
+       - **AC-F-002**: ... <!-- MODIFIED -->  本轮修改
+       - **AC-F-001**: ... <!-- REMOVED -->   本轮移除(原文保留,不删)
+     validate_specs.py 会据此算出下游影响面;export_openspec.py 会导出成 OpenSpec 的 delta 格式。 -->
 
 ### 3.1 功能验收
 

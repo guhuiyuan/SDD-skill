@@ -111,6 +111,12 @@ python skills/sdd/scripts/validate_specs.py --feature user-auth
 
 # 把规范路径与约束注入 CLAUDE.md(marker 包裹,幂等)
 python skills/sdd/scripts/update_claude_md.py --feature user-auth
+
+# 验收报告行为自检(阶段 5 收尾时跑)
+python skills/sdd/scripts/verify_acceptance.py --feature user-auth
+
+# 导出为 OpenSpec 目录结构(生态互操作)
+python skills/sdd/scripts/export_openspec.py --feature user-auth
 ```
 
 `validate_specs.py` 的检查项:
@@ -120,8 +126,26 @@ python skills/sdd/scripts/update_claude_md.py --feature user-auth
 | proposal | 章节齐全;§2.2「不做什么」≥3 条;每条 AC 可二值化;性能 AC 已量化到阈值;术语与正文一致;AC 编号连续 |
 | design | 模块职责表含「不做什么」列;ADR 六要素齐全且编号连续、状态合法;追溯矩阵覆盖全部 AC;假设已承接 |
 | tasks | Task 编号连续;标题动词开头;每个 Task 有验证命令;依赖 DAG 无环;追溯矩阵覆盖全部 AC |
+| 跨文档 | delta 影响面:标记 MODIFIED/REMOVED 的 AC 列出下游需复核的设计条目与 Task |
+
+`verify_acceptance.py` 的检查项:每条 AC 是否真的验过、结果能否判定、结果与 tasks 勾选状态是否一致、
+结论与实测是否相符、性能指标是否实测。
 
 退出码 `0` = 通过,`1` = 有错误。加 `--json` 输出结构化结果。
+
+### Delta 变更语义
+
+规范不是一次写完的。修订时在条目**行尾**加 delta 标记(OpenSpec 同名关键字):
+
+```markdown
+- **AC-F-003**: 给定...,系统 SHALL ... <!-- ADDED -->     本轮新增
+- **AC-F-002**: 给定...,系统 SHALL ... <!-- MODIFIED -->  本轮修改
+- **AC-F-001**: 给定...,系统 SHALL ... <!-- REMOVED -->   本轮移除(原文保留)
+```
+
+- `ADDED` 的 AC 必须同步补上 design 追溯条目与 Task,否则校验报错
+- `MODIFIED` / `REMOVED` 的 AC,校验器会列出下游受影响的设计条目与 Task,提示复核
+- `export_openspec.py` 把它导出成 OpenSpec 的 `## ADDED/MODIFIED/REMOVED Requirements` 三段结构
 
 ### 与 `/git` skill 衔接
 
@@ -143,10 +167,11 @@ python skills/sdd/scripts/update_claude_md.py --feature user-auth
 | 载体 | Claude Code skill(纯 Markdown + Python 脚本,零依赖) | Python CLI `specify` | Node CLI | 单一提示词 |
 | 规范结构 | proposal / design / tasks 三件套 | constitution + spec + plan + tasks | proposal / design / tasks + `specs/` delta | 提示词七要素 |
 | 阶段门禁 | 每阶段 Gate 清单 + 机器校验 | constitution 合规门禁 | 无强制门禁 | 无门禁 |
-| 变更语义 | ADR 只追加 + 逆向修改流程 | spec 修订 | ADDED/MODIFIED/REMOVED delta + archive | 提示词↔代码双向同步 |
+| 变更语义 | ADR 只追加 + delta 标记 + 逆向修改流程 | spec 修订 | ADDED/MODIFIED/REMOVED delta + archive | 提示词↔代码双向同步 |
 | 人类介入 | 选项化提问强制拍板(选型/边界/验收/提交) | clarify 阶段结构化问答 | 依赖提议人自律 | 轻 |
 | 执行阶段 | 严格闭环 + 子 agent 并行 + 每 Task 带验证命令 | 逐任务执行 | `/opsx:apply` | 双向同步 |
-| **独立验收阶段** | **有:功能/接口/架构/性能 + AC 回放矩阵 + 验收报告** | 无 | 无 | 无 |
+| **独立验收阶段** | **有:功能/接口/架构/性能 + AC 回放矩阵 + 验收报告 + 行为自检脚本** | 无 | 无 | 无 |
+| 生态互操作 | 可导出为 OpenSpec 目录结构 | — | 本身即 OpenSpec | — |
 | 轻量度 | 无 CLI、无安装,拷贝即用 | 需 Python 3.11+ / uv | 需 Node CLI | 只需提示词 |
 
 **什么时候用哪个**:
@@ -157,7 +182,8 @@ python skills/sdd/scripts/update_claude_md.py --feature user-auth
 - 想要**人机分工明确、每步有机器可验证的通过判据、并且交付前有正式验收** → 用本 skill
 
 本 skill 与它们**不互斥**:`specs/<feature>/` 的三件套结构与 OpenSpec 的 change 目录同源,
-未来可加导出脚本做生态互操作。
+`export_openspec.py` 可把规范导出为 OpenSpec 格式,`openspec/changes/` → `openspec/specs/`
+的归档合并也能反向进行。
 
 ---
 

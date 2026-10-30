@@ -129,6 +129,8 @@ AI 禁止:擅自扩大范围;增加 proposal 里没有的功能;删除或改写�
    并在 changelog 留痕
 6. 每次修改规范后都跑 `scripts/validate_specs.py`
 7. 每条 AC 至少被一个 Task 覆盖;Task 的依赖构成 DAG,不得有环
+8. 修订已有规范时给变动的 AC 加 delta 标记(`<!-- ADDED -->` / `<!-- MODIFIED -->` /
+   `<!-- REMOVED -->`),让下游影响面可计算
 
 ## 反模式对照
 
@@ -155,8 +157,10 @@ AI 禁止:擅自扩大范围;增加 proposal 里没有的功能;删除或改写�
 
 **scripts/**(确定性操作,直接执行)
 - `init_specs.py <feature>` —— 创建 `specs/<feature>/` 并铺好三份骨架
-- `validate_specs.py --feature <feature>` —— 校验规范完整性、AC 可测试性、DAG 无环、追溯闭合
+- `validate_specs.py --feature <feature>` —— 校验规范完整性、AC 可测试性、DAG 无环、追溯闭合、delta 影响面
 - `update_claude_md.py --feature <feature>` —— 把规范路径注入项目 CLAUDE.md(marker 包裹,幂等)
+- `verify_acceptance.py --feature <feature>` —— 验收报告行为自检:防止漏验却宣布通过
+- `export_openspec.py --feature <feature>` —— 把规范导出为 OpenSpec 目录结构(生态互操作)
 
 脚本用 Python 3 标准库实现,无第三方依赖。命令按 `python <脚本路径>` 调用;
 环境里是 `python3` 或 `py` 时替换即可。

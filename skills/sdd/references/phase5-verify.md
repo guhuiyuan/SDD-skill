@@ -76,11 +76,14 @@ AI 给出**建议结论 + 依据**,人决定最终结论。不要自己宣布通
 ## 收尾
 
 1. 用 `assets/templates/acceptance-report.md` 生成报告
-2. **AskUserQuestion 确认后** git commit 验收报告:
+2. **跑行为自检**:`python <skill目录>/scripts/verify_acceptance.py --feature <feature>`
+   —— 它会核对每条 AC 是否真的验过、结果是否与 tasks 的勾选状态一致、结论是否与实测相符。
+   有错误就修报告或补验证,不要带着错提交。
+3. **AskUserQuestion 确认后** git commit 验收报告:
    `docs(spec): 完成 <feature> 验收报告 v1.0`
-3. 打 tag:`git tag -a v1.0 -m "<feature> 首版完成"`
-4. 更新 `proposal.md` §0 版本号为 `v1.0`,在 changelog 记录
-5. 若有未达标 AC:在 `tasks.md` 里新增补做 Task(或走逆向修改流程调整规范),不要留着不说
+4. 打 tag:`git tag -a v1.0 -m "<feature> 首版完成"`
+5. 更新 `proposal.md` §0 版本号为 `v1.0`,在 changelog 记录
+6. 若有未达标 AC:在 `tasks.md` 里新增补做 Task(或走逆向修改流程调整规范),不要留着不说
 
 ## 常见坑
 

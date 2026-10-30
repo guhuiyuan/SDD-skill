@@ -34,9 +34,12 @@ HEADING_RE = re.compile(r'^(#{1,6})\s+(.*?)\s*$')
 NUMBER_RE = re.compile(r'^(\d+(?:\.\d+)*)\.?\s+(.*)$')
 BULLET_RE = re.compile(r'^\s*[-*+]\s+(.*)$')
 AC_RE = re.compile(r'(?<![A-Za-z0-9])(AC-([FPE])-(\d{3}))(?![0-9])')
+# delta 标记:写在条目行尾,使用 OpenSpec 同名关键字
+DELTA_RE = re.compile(r'<!--\s*(ADDED|MODIFIED|REMOVED)\s*-->')
 ADR_RE = re.compile(r'^ADR-(\d{3})\s*[:：]\s*(.*)$')
 TASK_RE = re.compile(r'^(?:\[(?:[ xX])\]\s*)?TASK-(\d{3})\s*[:：]?\s*(.*)$')
-PLACEHOLDER_RE = re.compile(r'<[^<>\n]{1,120}>')
+# 占位符形如 <...>;HTML 注释(<!-- MODIFIED --> 等 delta 标记)不算占位符
+PLACEHOLDER_RE = re.compile(r'<(?!!--)[^<>\n]{1,120}>')
 # 形如 <...> 的占位符;排除少量 HTML 标签
 HTML_TAG_RE = re.compile(
     r'^</?(br|hr|img|a|p|div|span|code|pre|b|i|em|strong|td|th|tr|table|ul|ol|li|'
@@ -350,6 +353,16 @@ def validate_proposal(path, report):
             report.error(where, '验收标准编号重复: %s' % ac_id)
         seen[ac_id] = True
 
+    # delta 标记
+    deltas = {}
+    for ln in clean.splitlines():
+        m = AC_RE.search(ln)
+        if not m:
+            continue
+        d = DELTA_RE.search(ln)
+        if d:
+            deltas[m.group(1)] = d.group(1)
+
     # 按小节归属
     by_section = {}
     for sub, kind in (('3.1', 'F'), ('3.2', 'P'), ('3.3', 'E')):
@@ -430,7 +443,7 @@ def validate_proposal(path, report):
     for line_no, token in find_placeholders(text):
         report.error(where, '第 %d 行仍有未填写的占位符 %s' % (line_no, token))
 
-    return {'acs': sorted(seen), 'terms': terms, 'asms': asms}
+    return {'acs': sorted(seen), 'terms': terms, 'asms': asms, 'deltas': deltas}
 
 
 def find_ac_line(clean_text, ac_id):
@@ -516,6 +529,7 @@ def validate_design(path, report, proposal):
                              % (n, status))
 
     # 追溯矩阵:覆盖 proposal 全部 AC
+    trace_map = {}
     if '6' in secs and proposal.get('acs'):
         tables = parse_tables(section_lines(lines, secs['6']))
         trace = table_by_header(tables, 'AC')
@@ -523,12 +537,18 @@ def validate_design(path, report, proposal):
         if trace:
             for row in trace['rows']:
                 cell_text_ = strip_placeholders(cell_text(row))
-                covered.update(m.group(1) for m in AC_RE.finditer(cell_text_))
+                ids = [m.group(1) for m in AC_RE.finditer(cell_text_)]
+                for ac_id in ids:
+                    others = [c for c in row if c and ac_id not in c]
+                    trace_map.setdefault(ac_id, []).extend(others)
+                covered.update(ids)
         else:
             report.error(where, '§6 追溯矩阵未找到(表头需含「AC」)')
         for ac in proposal['acs']:
             if ac not in covered:
-                report.error(where, '§6 追溯矩阵未覆盖 %s' % ac)
+                tag = (proposal.get('deltas') or {}).get(ac)
+                extra = '(本轮标记为 %s,新增需求尚未落到设计)' % tag if tag == 'ADDED' else ''
+                report.error(where, '§6 追溯矩阵未覆盖 %s%s' % (ac, extra))
 
     # §5 假设表
     if '5' in secs and proposal.get('asms'):
@@ -546,7 +566,7 @@ def validate_design(path, report, proposal):
     for line_no, token in find_placeholders(text):
         report.error(where, '第 %d 行仍有未填写的占位符 %s' % (line_no, token))
 
-    return {'adrs': adr_numbers}
+    return {'adrs': adr_numbers, 'trace': trace_map}
 
 
 # ---------------------------------------------------------------- tasks 校验
@@ -631,18 +651,26 @@ def validate_tasks(path, report, proposal):
         report.error(where, '任务依赖存在环: %s' % ' → '.join('TASK-%03d' % c for c in cycle))
 
     # 追溯矩阵:覆盖 proposal 全部 AC
+    trace_map = {}
     if '4' in secs and proposal.get('acs'):
         tables = parse_tables(section_lines(lines, secs['4']))
         trace = table_by_header(tables, 'AC')
         covered = set()
         if trace:
             for row in trace['rows']:
-                covered.update(m.group(1) for m in AC_RE.finditer(strip_placeholders(cell_text(row))))
+                cell_text_ = strip_placeholders(cell_text(row))
+                ids = [m.group(1) for m in AC_RE.finditer(cell_text_)]
+                for ac_id in ids:
+                    others = [c for c in row if c and ac_id not in c]
+                    trace_map.setdefault(ac_id, []).extend(others)
+                covered.update(ids)
         else:
             report.error(where, '§4 追溯矩阵未找到(表头需含「AC」)')
         for ac in proposal['acs']:
             if ac not in covered:
-                report.error(where, '§4 追溯矩阵未覆盖 %s,存在无人实现的需求' % ac)
+                tag = (proposal.get('deltas') or {}).get(ac)
+                extra = '(本轮标记为 %s,新增需求尚未拆成 Task)' % tag if tag == 'ADDED' else ''
+                report.error(where, '§4 追溯矩阵未覆盖 %s,存在无人实现的需求%s' % (ac, extra))
 
     # 任务总数元信息
     meta = parse_tables(lines[:12])
@@ -660,16 +688,42 @@ def validate_tasks(path, report, proposal):
     for line_no, token in find_placeholders(text):
         report.error(where, '第 %d 行仍有未填写的占位符 %s' % (line_no, token))
 
-    return {'tasks': numbers, 'done': done}
+    return {'tasks': numbers, 'done': done, 'trace': trace_map}
 
 
 # ---------------------------------------------------------------- 入口
 
+def analyze_delta_impact(report, feature, proposal, design, tasks):
+    """delta 变更的下游影响:标记了 MODIFIED/REMOVED 的 AC 需要复核设计与任务。"""
+    deltas = proposal.get('deltas') or {}
+    if not deltas:
+        return
+    where = 'specs/%s' % feature
+    d_trace = design.get('trace') or {}
+    t_trace = tasks.get('trace') or {}
+    for ac_id in sorted(deltas):
+        tag = deltas[ac_id]
+        if tag == 'ADDED':
+            continue  # 追溯覆盖检查已报错,ADDED 的缺口就是缺覆盖
+        targets = []
+        if ac_id in d_trace:
+            targets.append('design ' + ', '.join(d_trace[ac_id]))
+        if ac_id in t_trace:
+            targets.append('tasks ' + ', '.join(t_trace[ac_id]))
+        if targets:
+            report.warn(where, '%s 标记为 %s,下游需复核 → %s'
+                        % (ac_id, tag, '; '.join(targets)))
+        else:
+            report.warn(where, '%s 标记为 %s,但追溯矩阵里已找不到下游条目,确认是否同步清理'
+                        % (ac_id, tag))
+
+
 def validate_feature(root, feature, report):
     base = os.path.join(root, 'specs', feature)
     proposal = validate_proposal(os.path.join(base, 'proposal.md'), report)
-    validate_design(os.path.join(base, 'design.md'), report, proposal)
-    validate_tasks(os.path.join(base, 'tasks.md'), report, proposal)
+    design = validate_design(os.path.join(base, 'design.md'), report, proposal)
+    tasks = validate_tasks(os.path.join(base, 'tasks.md'), report, proposal)
+    analyze_delta_impact(report, feature, proposal, design, tasks)
 
 
 def main(argv=None):
