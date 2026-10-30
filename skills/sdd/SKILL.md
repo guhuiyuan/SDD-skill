@@ -176,6 +176,9 @@ python <skill目录>/scripts/update_claude_md.py --feature <feature>
 它会在项目 `CLAUDE.md` 里维护一段 marker 包裹的区块,内容为规范文件路径 +
 「本项目开发工作必须遵循以下规范文档」+ 当前阶段 + 未完成 Task 数。已存在则只更新区块内容。
 
+区块是**项目级索引**:它会列出 `specs/` 下的全部 feature,所以在已有 feature 的项目里新增
+第二个 feature 后,再跑一次本脚本不会把第一个 feature 的路径挤掉。区块之外的用户内容不会被改动。
+
 这样规范就不只是文档,而是**每个会话的默认约束**。
 
 ## 与 /git skill 的衔接

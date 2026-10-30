@@ -53,6 +53,21 @@ def parse_tasks(text):
     return out
 
 
+STAGE_ORDER = {
+    'Phase 1': 1, 'Phase 2': 2, 'Phase 3': 3, 'Phase 4': 4, 'Phase 5': 5,
+}
+
+
+def stage_order(stage_text):
+    """把阶段文本转成可比较的序号;无法识别时返回 99(视为最晚)。"""
+    if not stage_text:
+        return 99
+    for key, val in STAGE_ORDER.items():
+        if stage_text.startswith(key):
+            return val
+    return 99
+
+
 def read(path):
     if not os.path.isfile(path):
         return ''
@@ -75,7 +90,7 @@ def build_block(root, feature, features=None):
 
     rows = []
     next_step = ''
-    stage = ''
+    stage = None
     total_tasks = 0
     done_tasks = 0
 
@@ -105,18 +120,25 @@ def build_block(root, feature, features=None):
         if not next_step:
             for tid, is_done, title in tasks:
                 if not is_done:
-                    next_step = ('%s %s' % (tid, title)).strip()
+                    # 多 feature 时必须带上 feature 名,否则不知道下一步是谁的
+                    label = ('%s · %s %s' % (feat, tid, title)).strip() \
+                        if len(targets) > 1 else ('%s %s' % (tid, title)).strip()
+                    next_step = label
                     break
 
-        if not stage:
-            if tasks and done < len(tasks):
-                stage = 'Phase 4 — 代码生成'
-            elif tasks:
-                stage = 'Phase 5 — 验证与交付'
-            elif d_text:
-                stage = 'Phase 3 — 任务拆解'
-            else:
-                stage = 'Phase 2 — 架构设计'
+        # 每个 feature 各自算阶段,项目整体取**最早**的那个(还有设计没做完就还是 Phase 2)
+        if tasks and done < len(tasks):
+            feat_stage = 'Phase 4 — 代码生成'
+        elif tasks:
+            feat_stage = 'Phase 5 — 验证与交付'
+        elif d_text:
+            feat_stage = 'Phase 3 — 任务拆解'
+        elif p_text:
+            feat_stage = 'Phase 2 — 架构设计'
+        else:
+            feat_stage = 'Phase 1 — 定义需求'
+        if stage is None or stage_order(feat_stage) < stage_order(stage):
+            stage = feat_stage
 
     lines = []
     lines.append(BEGIN)
@@ -169,10 +191,17 @@ def main(argv=None):
             sys.stderr.write('%s 下没有任何 feature 目录\n' % specs_dir)
             return 1
     else:
-        features = [args.feature]
         if not os.path.isdir(os.path.join(specs_dir, args.feature)):
             sys.stderr.write('找不到 feature 目录: %s\n'
                              % os.path.join(specs_dir, args.feature))
+            return 1
+        # CLAUDE.md 里的区块是**项目级索引**,必须列出 specs/ 下的全部 feature。
+        # 若只写当前这一个,新增第二个 feature 时会把已有 feature 的路径挤掉,
+        # 那份项目的规范就等于从上下文里消失了。
+        features = sorted(d for d in os.listdir(specs_dir)
+                          if os.path.isdir(os.path.join(specs_dir, d)))
+        if not features:
+            sys.stderr.write('%s 下没有任何 feature 目录\n' % specs_dir)
             return 1
 
     claude_md = os.path.join(root, 'CLAUDE.md')
