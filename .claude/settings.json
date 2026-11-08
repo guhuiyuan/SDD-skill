@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python skills/sdd/scripts/validate_specs.py --feature agent-pipeline --root \"D:/prep for work/Projects/YuanRAG\" --phase)",
+      "Bash(git add *)",
+      "Bash(git commit -q -m ' *)"
+    ]
+  }
+}

@@ -364,6 +364,308 @@ FILES = {'proposal.md': PROPOSAL % {'delta1': ''}, 'design.md': DESIGN,
 
 PASSED, FAILED = [], []
 
+# ---- as-is(现状逆向)场景夹具:照 brownfield 存量系统的形态造 ----
+
+ASIS_PROPOSAL = """# 测试项目 — 现状规范
+
+<!-- SDD:SPEC:proposal -->
+
+## 0. 元信息
+
+| 项目 | demo |
+|------|------|
+| 版本 | v0.5 |
+| 状态 | 草稿 |
+| 日期 | 2026-11-08 |
+| 关联文档 | design.md, tasks.md |
+
+## 1. 背景与目标
+
+### 1.1 背景
+
+系统已上线运行,行为契约目前只存在于代码注释与历史提交记录里。
+
+### 1.2 目标
+
+**系统层**：让提问者拿到一份**带可核对引用**的答案——引用编号与来源列表一致,检索无结果时
+给出明确拒绝而不是编造。
+
+**规范层**：把这些行为固化成可评审、可追溯的契约,使得未参与过开发的开发者或 AI 会话
+仅凭本规范即可准确复述现状行为契约。
+
+### 1.3 目标用户
+
+**使用系统的人**：内部客服人员,单班次 10 人以内。
+
+**读这份规范的人**：维护该链路的开发者、评审者、后续会话的 AI 编码代理。
+
+## 2. 功能范围
+
+### 2.1 做什么（本期）
+
+- 本期覆盖的行为契约包括:意图分类与路由决策链、引用编号一致性、异常降级与拒绝契约、边界输入行为
+
+### 2.2 不做什么（本期明确排除）
+
+- 不修改任何生产代码。本期产出物只有规范文档,§6 列出的缺口只记录不动手
+- 不重建向量库 schema,只描述其对外可观测行为
+- 不提出改造方案,§6 的缺口清单只陈述事实与影响
+
+### 2.3 技术约束
+
+- Python 3.11+,自研异步状态机
+- 事实来源限定为源码、现有 pytest 断言、固定评测集期望值与历史提交记录
+- 采信规则：当 README、代码注释、类型注解或配置示例与实际实现冲突时,本规范一律采信实现
+
+## 3. 验收标准
+
+### 3.1 功能验收
+
+- **AC-F-001**: 给定一次成功回答,答案内来源编号顺序与 wire 事件 sources 的 index 顺序 SHALL 来自同一份有序清单
+- **AC-F-002**: 给定校验器判定答案不一致且修复预算未耗尽,系统 SHALL 把修复指令注入合成提示并重新合成
+
+### 3.2 性能验收
+
+- **AC-P-001**: 在 100 并发下,列表接口响应时间 SHALL 小于 200ms
+- **AC-P-002**: 给定探针重排分,系统 SHALL 进入真实检索路径,门限为当前生效的相关度门限（默认 0.05,可用 RAG_MIN_TOP_RELEVANCE_SCORE 覆盖）
+
+### 3.3 边界场景
+
+- **AC-E-001**: 当请求体缺少 title 字段时,系统 SHALL 返回 HTTP 400 且响应体包含缺失字段名
+
+## 4. 术语定义
+
+| 术语 | 定义 |
+|------|------|
+| 门限 | 决定是否进入真实检索的相关度下限 |
+
+## 5. 假设与开放问题
+
+- **ASM-001**: 本规范基于对源码的静态审查,未运行代码;所有行为断言均为静态判定
+- **OQ-001**: 某 wire 事件前端未消费,是有意还是待补?需产品侧拍板
+
+## 6. 现状缺口清单
+
+| # | 现状事实 | 位置 | 文档侧失真 | 影响 |
+|---|---------|------|-----------|------|
+| 1 | 相关度门限为 0.05 | config/constants.py:211 | README 写 0.3 | 调参误导 |
+
+## 7. 变更记录
+
+| 日期 | 版本 | 变更 | 原因 | 影响 |
+|------|------|------|------|------|
+| 2026-11-08 | v0.5 | 完成现状规范初稿 | 存量系统补写规范 | 确立行为契约基线 |
+"""
+
+ASIS_DESIGN = """# 测试项目 — 架构设计
+
+<!-- SDD:SPEC:design -->
+
+## 0. 元信息
+
+| 项目 | demo |
+|------|------|
+| 版本 | v0.5 |
+| 状态 | 草稿 |
+| 日期 | 2026-11-08 |
+| 关联文档 | proposal.md, tasks.md |
+
+## 1. 系统架构
+
+### 1.1 模块划分
+
+| 模块 | 职责（做什么） | 不做什么 | 依赖 |
+|------|--------------|----------|------|
+| `query-pipeline` | 意图分类、路由决策与呈现决策 | 不负责 HTTP 协议解析;不负责检索实现 | 无 |
+| `retrieval` | 文档检索、相关度门限判定与重排 | 不负责意图分类;不负责答案合成 | `query-pipeline` |
+| `synthesis` | 答案合成、引用整理与幻觉校验 | 不负责检索;不负责用户可见文案 | `query-pipeline` |
+
+### 1.2 数据流向
+
+客户端 → `query-pipeline` → `retrieval` → `synthesis` → 客户端。
+
+## 2. 技术选型 ADR
+
+### ADR-003: 相关度门限采用重排交叉编码器分数
+
+- **状态**: 已采纳
+- **背景**: 早期门限取快速评分分数的 0.3,换用重排分数后从未重新标定
+- **选项**:
+  - A. 保持 0.3 —— 代价:大量真阳性被当成无结果
+  - B. 取 0.05 —— 代价:门槛偏低,需靠重排分数分布保证
+- **决策**: 选 B,并保留环境变量覆盖以便按语料调整
+- **理由**: 门限必须按当前分数的实测分布标定,不能沿用上一代分数的遗产
+- **对应 AC**: AC-P-002
+
+### ADR-004: 引用编号采用一份清单同一顺序
+
+- **状态**: 已采纳
+- **背景**: 引用编号在答案正文与来源数组两处独立生成,曾出现不一致
+- **选项**:
+  - A. 各自生成 —— 代价:两处可能不一致
+  - B. 同一份有序清单重映射 —— 代价:需要一次重编号
+- **决策**: 选 B
+- **理由**: 单一来源消除了不一致的可能
+- **对应 AC**: AC-F-001
+
+### ADR-005: 校验反馈闭环
+
+- **状态**: 已采纳
+- **背景**: 校验不一致时若不复核,用户可能看到编造答案
+- **选项**:
+  - A. 校验后不修复 —— 代价:不一致答案直接上线
+  - B. 注入修复指令并重新合成 —— 代价:增加一轮模型调用
+- **决策**: 选 B
+- **理由**: 不一致答案对用户的危害大于一轮额外开销
+- **对应 AC**: AC-F-002
+
+## 3. 接口契约
+
+### 3.1 数据模型
+
+#### 实体: Answer
+
+| 字段 | 类型 | 语义 | 约束 |
+|------|------|------|------|
+| `text` | string | 答案正文 | 非空 |
+| `sources` | list | 有序来源清单 | 与引用编号同源 |
+
+### 3.2 模块接口签名
+
+#### `retrieval.search(query, thread_id) -> Result`
+
+- **语义**: 按线程作用域检索文档
+- **错误**: 线程标识非法时抛出线程必需异常
+- **不变量**: 返回记录的来源类别都在枚举内
+
+## 4. 非功能性约束
+
+### 4.1 性能
+
+- 列表接口在 100 并发下 SHALL 保持 P95 小于 200ms（对应 AC-P-001）
+- 相关度门限默认 0.05,可用 `RAG_MIN_TOP_RELEVANCE_SCORE` 覆盖
+
+### 4.2 安全
+
+- **Key 管理**: 密钥只从环境变量读取,不落代码库
+- **数据安全**: 文档内容视为用户私有数据,日志不记录完整正文
+- **访问控制**: 检索强制按线程过滤,空线程标识是全局哨兵例外
+
+### 4.3 错误处理与优雅降级
+
+- 检索失败 → 返回空检索状态并给出拒绝文案 → 记录 WARN 日志
+
+### 4.4 可运维性
+
+- **日志**: 结构化 JSON,含 level、path、requestId
+- **健康检查**: `GET /healthz` 返回依赖连通状态
+- **配置热更新**: 相关度门限支持环境变量覆盖,无需重启
+
+## 5. 依赖与假设
+
+| 编号 | 假设 | 前提不成立时的退化方案 |
+|------|------|------------------------|
+| ASM-001 | 行为断言基于静态审查 | 若实测冲突,以实测为准并按逆向修改流程更新本规范 |
+| OQ-001 | 前端是否消费该 wire 事件待定 | 未定前按现状固化 |
+
+## 6. 追溯矩阵
+
+| AC | 承接的设计条目 |
+|----|----------------|
+| AC-F-001 | §2 ADR-004 / §3.1 实体 Answer |
+| AC-F-002 | §2 ADR-005 |
+| AC-P-001 | §4.1 性能 |
+| AC-P-002 | §2 ADR-003 / §4.1 性能 |
+| AC-E-001 | §4.3 错误处理 |
+
+## 7. 变更记录
+
+| 日期 | 版本 | 变更 | 原因 | 影响 |
+|------|------|------|------|------|
+| 2026-11-08 | v0.5 | 完成 design 初稿 | — | — |
+"""
+
+ASIS_TASKS = """# 测试项目 — 任务拆解
+
+<!-- SDD:SPEC:tasks -->
+
+## 0. 元信息
+
+| 项目 | demo |
+|------|------|
+| 版本 | v0.5 |
+| 关联文档 | proposal.md, design.md |
+| 任务总数 | 3 |
+| 执行策略 | 串行,每个 Task 产出规范描述与核对证据 |
+| 批次 | M1 |
+
+## 1. 任务列表
+
+### [x] TASK-001: 核对路由决策与引用编号契约
+
+- **描述**: 核对意图分类、路由决策链与引用编号一致性
+- **输入**: 无
+- **输出**: proposal §3 对应条目与核对证据
+- **验收标准**: 三条 AC 均有源码或测试支撑点
+- **依赖**: 无
+- **验证命令**: `pytest tests/contract/test_routing.py`
+- **验证结果**: `pytest tests/contract/test_routing.py` → 6 passed
+
+### [x] TASK-002: 核对校验闭环与降级拒绝契约
+
+- **描述**: 核对答案校验反馈闭环与失败降级路径
+- **输入**: 无
+- **输出**: proposal §3 对应条目与核对证据
+- **验收标准**: 两条 AC 均有源码或测试支撑点
+- **依赖**: 无
+- **验证命令**: `pytest tests/contract/test_verify.py`
+- **验证结果**: `pytest tests/contract/test_verify.py` → 4 passed
+
+### [x] TASK-003: 核对性能预算与边界输入契约
+
+- **描述**: 核对性能预算、门限覆盖方式与边界输入拒绝
+- **输入**: 无
+- **输出**: proposal §3 对应条目与核对证据
+- **验收标准**: 三条 AC 均有源码或测试支撑点
+- **依赖**: 无
+- **验证命令**: `pytest tests/contract/test_limits.py`
+- **验证结果**: `pytest tests/contract/test_limits.py` → 3 passed
+
+## 2. 依赖关系图
+
+```mermaid
+graph TD
+  TASK-001[核对路由决策与引用编号契约]
+  TASK-002[核对校验闭环与降级拒绝契约]
+  TASK-003[核对性能预算与边界输入契约]
+```
+
+## 3. 推荐执行顺序
+
+```
+批次 1 (可并行 [P]): TASK-001, TASK-002, TASK-003
+```
+
+## 4. 追溯矩阵
+
+| AC | 覆盖的 Task |
+|----|-------------|
+| AC-F-001 | TASK-001 |
+| AC-F-002 | TASK-002 |
+| AC-P-001 | TASK-003 |
+| AC-P-002 | TASK-003 |
+| AC-E-001 | TASK-003 |
+
+## 5. 变更记录
+
+| 日期 | 版本 | 变更 | 原因 | 影响 |
+|------|------|------|------|------|
+| 2026-11-08 | v0.5 | 完成 tasks 初稿 | — | — |
+"""
+
+ASIS_FILES = {'proposal.md': ASIS_PROPOSAL, 'design.md': ASIS_DESIGN,
+              'tasks.md': ASIS_TASKS}
+
 
 def check(label, condition, detail=''):
     if condition:
@@ -671,6 +973,66 @@ def test_assumption_vs_open_question(tmp):
     check('proposal 里的 OQ 未被 design 承接时报错', code != 0 and 'OQ-001' in out, out[-300:])
 
 
+def test_as_is_mode(tmp):
+    """as-is(现状逆向)模式的规范:结构与规则都要能过校验。"""
+    print('\n=== as-is(现状逆向)模式 ===')
+    base = os.path.join(tmp, 's1')
+    d = make_project(base, files=ASIS_FILES)
+    code, out = run('validate_specs.py', '--feature', 'demo', '--root', base)
+    check('as-is 规范整体通过校验', code == 0, out[-600:])
+
+    text = io.open(os.path.join(d, 'proposal.md'), encoding='utf-8').read()
+    check('§1.2 同时有系统层与规范层目标',
+          '**系统层**' in text and '**规范层**' in text)
+    check('§1.3 分了「使用系统的人」与「读这份规范的人」两栏',
+          '**使用系统的人**' in text and '**读这份规范的人**' in text)
+    check('§2.2 显式写了不修改生产代码', '不修改任何生产代码' in text)
+    check('§2.3 写了采信规则(以实现为准)', '采信规则' in text)
+    check('AC 写「默认 X + 覆盖方式」而非字面值',
+          '默认 0.05' in text and '覆盖' in text)
+
+    dtext = io.open(os.path.join(d, 'design.md'), encoding='utf-8').read()
+    # 只数「行首就是模块名」的表格行——依赖列里也会出现别的模块名
+    def mod_rows(name):
+        return len(re.findall(r'^\| `%s` \|' % re.escape(name), dtext, re.M))
+    check('项目级规范:模块分区都落在 §1.1(三个分区)',
+          mod_rows('query-pipeline') == 1
+          and mod_rows('retrieval') == 1
+          and mod_rows('synthesis') == 1,
+          'query-pipeline=%d retrieval=%d synthesis=%d'
+          % (mod_rows('query-pipeline'), mod_rows('retrieval'), mod_rows('synthesis')))
+    check('ADR 全局编号不重启(首个是 ADR-003)', '### ADR-003:' in dtext)
+    check('ADR 有「对应 AC」字段', '对应 AC' in dtext)
+
+    # ADR 编号倒退
+    base = os.path.join(tmp, 's2')
+    d = make_project(base, files=ASIS_FILES)
+    mutate(os.path.join(d, 'design.md'),
+           '### ADR-004: 引用编号采用一份清单同一顺序',
+           '### ADR-006: 引用编号采用一份清单同一顺序')
+    code, out = run('validate_specs.py', '--feature', 'demo', '--root', base)
+    check('ADR 编号倒退时报错', code != 0 and '递增' in out, out[-400:])
+
+    # 「对应 AC」指向不存在的 AC
+    base = os.path.join(tmp, 's3')
+    d = make_project(base, files=ASIS_FILES)
+    mutate(os.path.join(d, 'design.md'),
+           '- **对应 AC**: AC-F-001', '- **对应 AC**: AC-F-999')
+    code, out = run('validate_specs.py', '--feature', 'demo', '--root', base)
+    check('ADR 的「对应 AC」指向不存在的 AC 时报错',
+          code != 0 and 'AC-F-999' in out, out[-400:])
+
+    # 性能 AC 只写「默认 X + 覆盖」没有比较符,不应被判为未量化
+    base = os.path.join(tmp, 's4')
+    d = make_project(base, files=ASIS_FILES)
+    mutate(os.path.join(d, 'proposal.md'),
+           '- **AC-P-002**: 给定探针重排分,系统 SHALL 进入真实检索路径,'
+           '门限为当前生效的相关度门限（默认 0.05,可用 RAG_MIN_TOP_RELEVANCE_SCORE 覆盖）',
+           '- **AC-P-002**: 给定探针重排分,系统 SHALL 进入真实检索路径,门限足够低')
+    code, out = run('validate_specs.py', '--feature', 'demo', '--root', base)
+    check('性能 AC 未给量化阈值时报错', code != 0 and '量化' in out, out[-400:])
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix='sdd-tests-')
     print('临时目录: %s' % tmp)
@@ -683,6 +1045,7 @@ def main():
         test_comment_handling(tmp)
         test_meta_section(tmp)
         test_assumption_vs_open_question(tmp)
+        test_as_is_mode(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print('\n' + '=' * 52)

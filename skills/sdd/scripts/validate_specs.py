@@ -77,6 +77,9 @@ THRESHOLD_RE = re.compile(
 GUARANTEE_RE = re.compile(
     r'(不丢失|不发生|不低于|不高于|不超过|不少于|不小于|不大于|至少|不早于|不晚于|'
     r'保持|无丢失|零丢失|一致|相同|不重复|不中断)')
+# 可覆盖值:「默认 0.05,可用 XXX 覆盖」是参数化的阈值,本身就是量化。
+# 没有比较符是正常的——生效值由环境决定,写死一个数反而会与现实脱节。
+OVERRIDE_RE = re.compile(r'(覆盖|可配|环境变量|override)', re.I)
 
 TASK_VERBS = (
     '实现', '编写', '添加', '接入', '配置', '部署', '修复', '重构', '优化', '补充',
@@ -87,6 +90,9 @@ TASK_VERBS = (
     '告警', '灰度', '发布', '回滚', '升级', '适配', '兼容', '暴露', '上报', '上报',
     '查询', '检索', '过滤', '排序', '分页', '导入', '导出', '同步', '异步', '编排',
     '串联', '解耦', '隔离', '限流', '鉴权', '授权', '加密', '解密', '脱敏', '审计',
+    # as-is(现状逆向)模式的 Task 产出物是「规范描述 + 与实现一致的核对证据」,
+    # 不是代码,动词自然是核对/核验/比对这一类
+    '核对', '核验', '比对', '复查', '核实', '厘清', '测绘', '归档',
 )
 TASK_VERBS_EN = (
     'implement', 'add', 'create', 'build', 'write', 'support', 'fix', 'refactor',
@@ -414,9 +420,11 @@ def validate_proposal(path, report):
         line = find_ac_line(clean, ac_id)
         if not line:
             continue
-        if not re.search(r'\d', line):
+        desc = strip_ac_id(line)
+        if not re.search(r'\d', desc):
             report.error(where, '性能验收标准 %s 必须量化为数字' % ac_id)
-        elif not (THRESHOLD_RE.search(line) or GUARANTEE_RE.search(line)):
+        elif not (THRESHOLD_RE.search(desc) or GUARANTEE_RE.search(desc)
+                  or (OVERRIDE_RE.search(desc) and re.search(r'\d', desc))):
             report.error(where, '性能验收标准 %s 未给出量化阈值:要写成「< 200ms」「≥ 500 QPS」'
                                 '这类可判定的形式,而不是「足够快」' % ac_id)
 
@@ -425,7 +433,7 @@ def validate_proposal(path, report):
         line = find_ac_line(clean, ac_id)
         if line is None:
             continue
-        desc = re.sub(r'^\s*[-*+]?\s*\**AC-[FPE]-\d{3}\**\s*[:：]?\s*', '', line).strip()
+        desc = strip_ac_id(line)
         if not desc:
             report.error(where, '验收标准 %s 缺少描述' % ac_id)
             continue
@@ -487,6 +495,15 @@ def find_ac_line(clean_text, ac_id):
     return None
 
 
+def strip_ac_id(line):
+    """去掉行首的 AC 编号前缀,只留描述。
+
+    必须去掉:编号本身含数字(AC-P-002),不去掉的话「这条 AC 有没有量化数字」的
+    判断永远成立,检查就成了死代码。
+    """
+    return re.sub(r'^\s*[-*+]?\s*\**AC-[FPE]-\d{3}\**\s*[:：]?\s*', '', line).strip()
+
+
 # ---------------------------------------------------------------- design 校验
 
 def validate_design(path, report, proposal):
@@ -541,11 +558,21 @@ def validate_design(path, report, proposal):
             adr_headings.append((int(m.group(1)), h))
     if not adr_headings:
         report.warn(where, '§2 没有发现任何 ADR(格式: ### ADR-001: 标题)')
-    adr_numbers = sorted(n for n, _ in adr_headings)
-    for idx, n in enumerate(adr_numbers, start=1):
-        if n != idx:
-            report.error(where, 'ADR 编号不连续:期望 ADR-%03d,实际 ADR-%03d' % (idx, n))
+    adr_numbers = [n for n, _ in adr_headings]
+    # 编号必须严格递增、无重复。项目内拆了多个规范集时编号是全局连续的,
+    # 某个规范集的首个 ADR 未必是 001(前面的号被别的规范集占了),所以不强制从 001 起。
+    for idx in range(1, len(adr_numbers)):
+        if adr_numbers[idx] <= adr_numbers[idx - 1]:
+            report.error(where, 'ADR 编号必须严格递增:ADR-%03d 出现在 ADR-%03d 之后'
+                         % (adr_numbers[idx], adr_numbers[idx - 1]))
             break
+    if adr_numbers and adr_numbers[0] == 1:
+        for idx, n in enumerate(adr_numbers, start=1):
+            if n != idx:
+                report.warn(where, 'ADR 编号不连续:期望 ADR-%03d,实际 ADR-%03d'
+                            '(若项目内拆了多个规范集、全局编号,这是正常的)'
+                            % (idx, n))
+                break
     valid_status = ('提议', '已采纳', '已废弃')
     for n, h in adr_headings:
         body = section_lines(lines, h)
@@ -561,6 +588,14 @@ def validate_design(path, report, proposal):
             if not ok:
                 report.error(where, 'ADR-%03d 状态「%s」不合法(应为 提议/已采纳/已废弃/已被 ADR-xxx 取代)'
                              % (n, status))
+        # 「对应 AC」交叉校验:ADR 解释的是哪条行为,填错要报出来
+        ac_field = field_value(tree, '对应 AC')
+        if ac_field and '<' not in ac_field and '留空' not in ac_field:
+            for m in AC_RE.finditer(ac_field):
+                ac_id = m.group(1)
+                if proposal.get('acs') and ac_id not in proposal['acs']:
+                    report.error(where, 'ADR-%03d 的「对应 AC」指向不存在的 %s'
+                                 % (n, ac_id))
 
     # 追溯矩阵:覆盖 proposal 全部 AC
     trace_map = {}
