@@ -6,3 +6,6 @@ venv/
 .DS_Store
 Thumbs.db
 *.log
+
+# Claude Code 自动生成的「已批准命令」记忆文件:含本机绝对路径、会话间不断变化
+.claude/settings.json
