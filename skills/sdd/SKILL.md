@@ -11,7 +11,12 @@ description: |
   update_claude_md / verify_acceptance / export_openspec)。
   仅在项目已启用 SDD(项目 CLAUDE.md 含 SDD 规范区块,或 specs/ 下已有规范目录),
   或用户明确要求走规范流程时使用;普通编码请求不要触发。
-allowed-tools: Read, Write, Edit, Glob, Grep, Bash, AskUserQuestion, Task, Agent
+allowed-tools: |
+  Read, Write, Edit, Glob, Grep, AskUserQuestion, Task, Agent,
+  Bash(python:*), Bash(python3:*), Bash(py:*), Bash(pytest:*), Bash(uv:*),
+  Bash(pip:*), Bash(poetry:*), Bash(node:*), Bash(npm:*), Bash(npx:*),
+  Bash(cargo:*), Bash(go:*), Bash(make:*), Bash(mvn:*), Bash(gradle:*),
+  Bash(git:*)
 ---
 
 # SDD 规范驱动开发

@@ -62,6 +62,36 @@ cp -r skills/sdd <your-project>/.claude/skills/sdd
 
 **依赖**:Python 3.7+(仅用标准库,用于三个辅助脚本)。不装也能用——脚本只是可选的校验与脚手架。
 
+### 用代理端点 / 自建网关时的权限配置
+
+Claude Code 的 auto 模式靠**服务端分类器**判断一条命令要不要弹窗确认。如果你的
+`ANTHROPIC_BASE_URL` 指向代理或自建网关,而它不透传这个分类器调用,分类器就不可达 ——
+结果是**所有需要判断的命令都会被直接拒绝**,而不是弹窗问你。
+
+表现出来的症状是间歇性的:已进 allowlist 的命令照常执行,不在 allowlist 里的随机被拒。
+
+SDD 流程是 Bash 密集的(5 个 Python 脚本 + git + 项目的测试命令),建议把下面这些
+加进 `~/.claude/settings.json` 的 `permissions.allow`,它们就会跳过分类器直接执行:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Bash(pytest:*)",
+      "Bash(npm:*)",
+      "Bash(cargo:*)",
+      "Bash(git:*)"
+    ]
+  }
+}
+```
+
+不想放这么宽,就用 `/permissions` 切到 auto 以外的模式(auto 之外的模式不需要服务端分类器)。
+
+> 注意:allowlist 管的是**权限弹窗**。skill 自己的「提交前先用 AskUserQuestion 问用户」
+> 是 AI 层面的流程约定,两者独立——allowlist 放行了 `git commit`,不代表 AI 会不问就提交。
+
 ---
 
 ## 使用
