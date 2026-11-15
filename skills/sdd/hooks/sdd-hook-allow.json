@@ -4,6 +4,13 @@
     "extra:命令前缀。命令以此开头就放行(后面可以带参数)。",
     "      install_hook.py --feature <name> 会自动从 specs/<name>/tasks.md 的「验证命令」字段填进来。",
     "      也可以自己加,例如 \"pytest\", \"npm test\", \"cargo test\"。",
+    "",
+    "写在这里的命令**不会**被无条件放行,hook 仍然会拦:",
+    "  - rm / curl / wget / sudo / chmod 等危险可执行文件(写进来也没用)",
+    "  - python -c 内联代码、python -m 任意模块",
+    "  - 只写一条 \"python\" 这种太松的模式(等于开了任意代码执行的后门)",
+    "  - 带 && ; | 等 shell 复合操作符的命令",
+    "",
     "tools:额外的工具名(除 Bash 外)。默认空 —— 放行 WebFetch 之类会把内容发到外部服务,",
     "      需要时再自己加。"
   ],

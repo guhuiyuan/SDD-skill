@@ -292,6 +292,9 @@ def main(argv=None):
     allowlist, existed = load_json(allowlist_path, template)
     allowlist.setdefault('extra', [])
     allowlist.setdefault('tools', [])
+    # 说明文字是生成的(不是用户内容),每次都从模板刷新
+    if '_说明' in template:
+        allowlist['_说明'] = template['_说明']
 
     for cmd in args.extra:
         cmd = CD_PREFIX_RE.sub('', str(cmd).strip())
