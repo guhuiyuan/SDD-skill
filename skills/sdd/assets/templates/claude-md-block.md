@@ -18,6 +18,10 @@
 2. 每个 Task 完成前必须跑通其「验证命令」；未通过不得推进到下游 Task。
 3. 不得擅自增加 `proposal.md` §2.1 之外的功能；需要新增时先改规范。
 4. 发现规范与实现冲突时，先停下并提出规范修改方案，经确认后再改代码。
-5. 提交前跑 `~/.claude/skills/sdd/scripts/validate_specs.py --feature <feature>`
+5. 提交前跑 `<技能脚本目录>/validate_specs.py --feature <feature>`
    （规范类）或该 Task 的验证命令（代码类）。
+6. 上述命令若因环境限制无法执行（权限被拒），**不得默认通过**。按
+   `<技能目录>/SKILL.md` 的「受限环境下的降级与解锁路径」处理：
+   用 AskUserQuestion 引导（切模式后重试 / 用户手动跑并贴回输出 /
+   跳过并标记待人工校验），被跳过的 Task 保持未勾选，结论标「未验证」。
 <!-- SDD:END -->

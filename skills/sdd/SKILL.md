@@ -8,7 +8,8 @@ description: |
   按规范实现、照规范写代码、验收、交付、给老项目补规范;也支持直接 /sdd 开始。
   产出固定放在项目根的 specs/<feature>/ 下(三份文档)+ acceptance-report.md,
   辅助脚本在 ~/.claude/skills/sdd/scripts/(init_specs / validate_specs /
-  update_claude_md / verify_acceptance / export_openspec)。
+  update_claude_md / verify_acceptance / export_openspec / install_hook);
+  带一个 PreToolUse hook,在 auto 模式的安全分类器不可用时让命令照常执行。
   仅在项目已启用 SDD(项目 CLAUDE.md 含 SDD 规范区块,或 specs/ 下已有规范目录),
   或用户明确要求走规范流程时使用;普通编码请求不要触发。
 allowed-tools: |
@@ -92,7 +93,7 @@ SDD 把这三件事外化成三份可评审、可版本化、可 diff 的文档:
 那时候应该回到该文档对应的阶段,而不是跳到 Phase 4 去写代码。
 
 ```bash
-python <skill目录>/scripts/validate_specs.py --feature <feature> --phase
+python ${CLAUDE_SKILL_DIR}/scripts/validate_specs.py --feature <feature> --phase
 ```
 
 输出形如:
@@ -193,6 +194,99 @@ AI 禁止:擅自扩大范围;增加 proposal 里没有的功能;删除或改写�
 | 规范过期了没人管 | 逆向修改流程:改规范 → 用户确认 → 再改代码 |
 | 规范和代码悄悄分叉 | 提交前跑 `validate_specs.py`;代码提交必须能追溯到 Task |
 
+## 受限环境下的降级与解锁路径
+
+有些环境(代理端点、自建网关、只读沙箱)里 **auto 模式的 bash 审批会整体失效**。
+Claude Code 的 auto 模式靠**服务端安全分类器**代替用户回答权限问题;分类器不可达时,
+所有需要它判断的命令**被直接拒绝**——auto 模式没有"回退到问用户"的路径。
+
+报错长这样:
+
+```
+Auto mode is unavailable: its safety check does not run for this session, so Bash was not run.
+Other actions that need the check will be denied too, and retrying won't help.
+```
+
+**不要重试。** 这条拒绝不是"这次没过、下次再来"的意思。
+
+### 0. 先装 hook —— auto 模式下唯一能根治的办法
+
+本技能带了一个 PreToolUse hook,它跑在**任何权限模式检查之前**,返回 `allow`
+即可跳过权限检查 —— **纯本地机制,不经过服务端分类器**。装上之后 auto 模式
+照常可用,子 agent 也能正常并行(子 agent 继承的是会话级设置,不是技能的
+`allowed-tools`,所以只有装在 settings.json 里的 hook 才能覆盖到它们)。
+
+一次性安装(在项目根目录跑):
+
+```bash
+python ${CLAUDE_SKILL_DIR}/scripts/install_hook.py --root . --feature <feature>
+```
+
+它写三样东西:hook 本体、可编辑的白名单、`.claude/settings.json` 的
+`hooks.PreToolUse` 条目。**只动这一个键**,不碰你已有的 `permissions`;
+重复运行幂等。
+
+> **这一步需要用户手动跑一次。** `.claude/` 是受保护目录,AI 代跑会被权限门拦下。
+> 装完**新开一个会话**才生效(Claude Code 在会话启动时读 settings.json)。
+>
+> 不想写项目文件也可以用 `/hooks` 命令手动注册 —— 命令里填 hook 的**绝对路径**
+> (`python "<技能目录>/hooks/sdd_bash_allow.py"`)。注意 `${CLAUDE_SKILL_DIR}` 只在
+> 本技能的内容里会被替换,手工填的命令里它不会生效。
+
+hook 放行:SDD 自己的脚本、git 的安全子命令(status/diff/log/show/rev-parse/
+branch/add/commit)、常见测试命令(pytest / npm test / cargo test / go test),
+以及白名单文件里的额外命令。
+
+**不放行**:rm / curl / wget / sudo 等危险可执行文件(即使写进白名单也不放行)、
+git push/reset/clean 与任何改变 git 行为的前置选项(`-c` 能定义 alias)、
+任意 python(`-c` / `-m 任意模块`)、太松的白名单模式、以及带 `&&` `;` `|` 等
+复合操作符的命令。
+
+它**不能覆盖** `permissions.deny` / `ask` 规则(deny/ask 优先),所以不会削弱
+已有的安全规则。安装器会逐条打印放进白名单的命令供你核对。
+
+### 1. 被拒了怎么办
+
+第一次跑脚本被拒 → 本会话处在受限环境。按顺序:
+
+1. **不重试**。
+2. **用 AskUserQuestion 问用户**——不要只在正文里贴命令。问题里必须带:
+   **命令原文** + **这条命令要干什么** + **被拒的原因**。三个选项:
+
+   | 选项 | 用户做什么 | AI 接着做什么 |
+   |---|---|---|
+   | **我切到非 auto 模式,你再重试 (推荐)** | 切到 `acceptEdits` / `default`(VS Code 权限模式选择器,或 `/permissions`)。切换后 bash 走**本地权限弹窗**,点允许即可执行 | 重试同一条命令 |
+   | **我手动跑这条命令,输出贴给你** | 在终端里跑,把输出贴回来(AskUserQuestion 的「Other」可直接粘贴) | 依据输出判定,**不再调 Bash** |
+   | **跳过这条,标记为待人工校验** | 选它 | 继续本阶段其余工作;命令记进阶段小结的「待人工执行的命令」;相关 Gate 结论标 **「未验证」** |
+
+   - 同一条命令不重复问;一个阶段里多条被拒命令**合并成一次** AskUserQuestion。
+   - 用户选「切模式」后重试仍被拒 → 明确告诉用户"切模式也没解决,这是端点侧的
+     持续性问题",引导到后两个选项。
+   - **AI 不得声称"已授予权限"**——AskUserQuestion 不改权限引擎,auto 模式下
+     没有这条通道。
+3. **继续本阶段其余工作**,把跑不了的命令记进阶段小结的「待人工执行的命令」清单。
+
+### 2. 硬依赖:Phase 4 的验证命令
+
+Phase 4 每个 Task 的「验证命令」是闭环的前提,**跑不了就停在原地**:
+不推进 Task、不默认通过、不把 Gate 结论写成「通过」。
+默认通过是最危险的降级——它会让整套闭环失效,而且是在没人察觉的情况下。
+
+### 3. Phase 1–3 与 Phase 5 的校验不依赖 bash
+
+用 Read 读出规范文档,对照 `references/phaseN-*.md` 里的 Gate 清单逐条核对,
+把每条的结论(通过 / 不通过 / 不适用 / **未验证**)和依据报给用户。
+脚本走法更稳(不会漏看),人工走法在受限环境里可用——**两者等价**。
+
+### 4. 工具分工
+
+| 用途 | 用什么 |
+|---|---|
+| 写规范、读代码 | Read / Write / Edit / Grep / Glob(本地文件工具,**不经分类器**) |
+| 跑校验脚本 | Bash(python …),或人工核对 |
+| 跑项目测试 | Bash(Phase 4 硬依赖) |
+| git 操作 | Bash(git …) |
+
 ## 资源索引
 
 **references/**(按需读,不要一次全读)
@@ -211,16 +305,21 @@ AI 禁止:擅自扩大范围;增加 proposal 里没有的功能;删除或改写�
 - `update_claude_md.py --feature <feature>` —— 把规范路径注入项目 CLAUDE.md(marker 包裹,幂等)
 - `verify_acceptance.py --feature <feature>` —— 验收报告行为自检:防止漏验却宣布通过
 - `export_openspec.py --feature <feature>` —— 把规范导出为 OpenSpec 目录结构(生态互操作)
+- `install_hook.py --root . [--feature <feature>]` —— 装 PreToolUse hook(auto 模式下让 bash 可用)
 
-脚本用 Python 3 标准库实现,无第三方依赖。命令按 `python <脚本路径>` 调用;
+脚本用 Python 3 标准库实现,无第三方依赖。命令按 `python ${CLAUDE_SKILL_DIR}/scripts/<脚本名>` 调用;
 环境里是 `python3` 或 `py` 时替换即可。
+
+**hooks/**
+- `sdd_bash_allow.py` —— PreToolUse hook:放行 SDD 自己的脚本、git 安全子命令、常见测试命令
+- `sdd-hook-allow.json` —— hook 的可编辑白名单(装到项目的 `.claude/hooks/` 下)
 
 ## 收尾:注入 CLAUDE.md
 
 规范写完后必须让**每一个新会话**都知道要遵守它们:
 
 ```bash
-python <skill目录>/scripts/update_claude_md.py --feature <feature>
+python ${CLAUDE_SKILL_DIR}/scripts/update_claude_md.py --feature <feature>
 ```
 
 它会在项目 `CLAUDE.md` 里维护一段 marker 包裹的区块,内容为规范文件路径 +

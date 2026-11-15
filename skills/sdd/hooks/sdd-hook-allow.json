@@ -1,0 +1,12 @@
+{
+  "_说明": [
+    "这是 SDD 的 PreToolUse hook 的额外白名单,装到 <项目根>/.claude/hooks/ 下。",
+    "extra:命令前缀。命令以此开头就放行(后面可以带参数)。",
+    "      install_hook.py --feature <name> 会自动从 specs/<name>/tasks.md 的「验证命令」字段填进来。",
+    "      也可以自己加,例如 \"pytest\", \"npm test\", \"cargo test\"。",
+    "tools:额外的工具名(除 Bash 外)。默认空 —— 放行 WebFetch 之类会把内容发到外部服务,",
+    "      需要时再自己加。"
+  ],
+  "extra": [],
+  "tools": []
+}

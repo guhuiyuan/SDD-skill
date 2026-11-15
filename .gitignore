@@ -9,3 +9,5 @@ Thumbs.db
 
 # Claude Code 自动生成的「已批准命令」记忆文件:含本机绝对路径、会话间不断变化
 .claude/settings.json
+# install_hook.py 装出来的 hook 副本:源码在 skills/sdd/hooks/,这里是安装产物
+.claude/hooks/

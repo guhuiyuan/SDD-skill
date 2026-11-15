@@ -64,33 +64,125 @@ cp -r skills/sdd <your-project>/.claude/skills/sdd
 
 ### 用代理端点 / 自建网关时的权限配置
 
-Claude Code 的 auto 模式靠**服务端分类器**判断一条命令要不要弹窗确认。如果你的
-`ANTHROPIC_BASE_URL` 指向代理或自建网关,而它不透传这个分类器调用,分类器就不可达 ——
-结果是**所有需要判断的命令都会被直接拒绝**,而不是弹窗问你。
+Claude Code 的 auto 模式靠**服务端分类器**代替用户回答「这条命令要不要执行」。
+如果你的 `ANTHROPIC_BASE_URL` 指向代理或自建网关,而它不透传这个分类器调用,
+分类器就不可达 —— 结果是**所有需要它判断的命令都被直接拒绝**,而不是弹窗问你
+(auto 模式没有「回退到问用户」的路径)。
 
-表现出来的症状是间歇性的:已进 allowlist 的命令照常执行,不在 allowlist 里的随机被拒。
+报错长这样:
 
-SDD 流程是 Bash 密集的(5 个 Python 脚本 + git + 项目的测试命令),建议把下面这些
-加进 `~/.claude/settings.json` 的 `permissions.allow`,它们就会跳过分类器直接执行:
-
-```json
-{
-  "permissions": {
-    "allow": [
-      "Bash(python:*)",
-      "Bash(pytest:*)",
-      "Bash(npm:*)",
-      "Bash(cargo:*)",
-      "Bash(git:*)"
-    ]
-  }
-}
+```
+Auto mode is unavailable: its safety check does not run for this session, so Bash was not run.
+Other actions that need the check will be denied too, and retrying won't help.
 ```
 
-不想放这么宽,就用 `/permissions` 切到 auto 以外的模式(auto 之外的模式不需要服务端分类器)。
+SDD 流程是 Bash 密集的(6 个 Python 脚本 + git + 每个 Task 一条验证命令),
+这个环境对 SDD 的影响最大。**首选解法是装本技能自带的 PreToolUse hook**(下一节),
+它纯本地生效,不依赖服务端分类器。
 
-> 注意:allowlist 管的是**权限弹窗**。skill 自己的「提交前先用 AskUserQuestion 问用户」
-> 是 AI 层面的流程约定,两者独立——allowlist 放行了 `git commit`,不代表 AI 会不问就提交。
+<details>
+<summary><b>为什么不能只靠 <code>permissions.allow</code>(实测结论)</b></summary>
+
+常见建议是「把 `Bash(python:*)` 加进 allowlist 就跳过分类器了」—— **实测不成立**。
+18 个对照探针的结果:
+
+| 命令 | 匹配到的规则 | 结果 |
+|---|---|---|
+| `git log --oneline -5` | `Bash(git:*)` | ✅ 放行 |
+| `npm run` | `Bash(npm:*)` | ✅ 放行 |
+| `git rm -h` | `Bash(git rm *)` | ✅ 放行 |
+| `python <脚本> --feature x` | `Bash(python:*)` | ❌ 拦截 |
+| `python -c "…"` | `Bash(python:*)` | ❌ 拦截 |
+| `python -c '…'` | `Bash(python -c ' *)` | ❌ 拦截 |
+| `.venv/Scripts/python.exe -c "…"` | `Bash(.venv/Scripts/python.exe:*)` | ❌ 拦截 |
+| `python <脚本> <固定参数>` | **钉死完整 argv 的精确规则** | ✅ 放行 |
+
+规律:**非解释器命令**(git / npm / cargo)的通配规则有效;**python 的任何带通配的
+规则都无效**,只有把完整 argv 钉死的精确规则才放行(多一个 `--json` 就不匹配)——
+而精确规则覆盖不了参数会变的场景。
+
+已排除的解释:不是会话状态、不是 token 额度、不是命令危险(被送去分类的全是
+`git log` / `grep` / `cat` 这类只读命令)、不是脚本在工作区内还是区外、
+不是 `cd &&` 复合形式、也不是 `dangerouslyDisableSandbox`。
+
+</details>
+
+不想装 hook 的话,只能用 `/permissions` 切到 auto 以外的模式 —— 非 auto 模式用的是
+**本地权限弹窗**,不需要服务端分类器。
+
+> 注意:allowlist 与 skill 自己的「提交前先用 AskUserQuestion 问用户」是两层独立的
+> 东西 —— allowlist 放行了 `git commit`,不代表 AI 会不问就提交。
+
+---
+
+### 装 PreToolUse hook(auto 模式下让命令照常执行)
+
+本技能带一个 PreToolUse hook。它跑在**任何权限模式检查之前**,返回 `allow` 即可
+跳过权限检查 —— **纯本地机制,不经过服务端分类器**,所以端点透传不了分类器也不影响它。
+这也是**子 agent 能正常并行**的前提:子 agent 继承的是会话级设置,不是技能的
+`allowed-tools`,只有装在 `settings.json` 里的 hook 能覆盖到它们。
+
+在项目根目录跑一次:
+
+```bash
+python <技能目录>/scripts/install_hook.py --root . --feature <feature>
+```
+
+它写三样东西:
+
+| 落点 | 内容 |
+|---|---|
+| `<项目根>/.claude/hooks/sdd_bash_allow.py` | hook 本体 |
+| `<项目根>/.claude/hooks/sdd-hook-allow.json` | 可编辑的白名单 |
+| `<项目根>/.claude/settings.json` 的 `hooks.PreToolUse` | 注册条目 |
+
+**只动 `hooks.PreToolUse` 这一个键**,不碰你已有的 `permissions`;重复运行幂等。
+给了 `--feature` 时,还会从 `specs/<feature>/tasks.md` 的「验证命令」字段提取命令
+写进白名单 —— 这样阶段 4 跑测试、子 agent 跑测试都不会再撞权限门。
+
+> **这一步需要你手动跑一次**:`.claude/` 是受保护目录,AI 代跑会被权限门拦下。
+> 装完**新开一个会话**才生效(Claude Code 在会话启动时读 settings.json)。
+>
+> 不想往项目里写文件,也可以用 `/hooks` 命令手动注册 —— 命令里填 hook 的**绝对路径**
+> (`python "<技能目录>/hooks/sdd_bash_allow.py"`)。`${CLAUDE_PROJECT_DIR}` 只在
+> 本项目的 `.claude` 目录正好是 Claude Code 项目目录时才对(从子目录启动就不对),
+> 所以默认用绝对路径;确认无误也可以加 `--portable`。
+
+**放行范围**:SDD 自己的脚本、git 的安全子命令(status/diff/log/show/rev-parse/
+branch/add/commit)、常见测试命令(pytest / npm test / cargo test / go test),
+以及白名单文件里的额外命令。
+
+**不放行**:
+
+- rm / curl / wget / sudo / chmod 等危险可执行文件 —— **即使你写进白名单也不放行**
+- git push / reset / clean,以及任何会改变 git 行为的**前置选项**
+  (`-c` 能定义 alias 把"安全子命令"换成任意 shell;`--exec-path` 能换掉子命令查找路径)
+- 任意 python(`python -c` / `python -m 任意模块`);解释器必须钉死脚本
+- 太松的白名单模式(例如白名单里只写一条 `python`)
+- 带 `&&` `;` `|` 等复合操作符的命令 —— 否则 `python 某脚本 && rm -rf /` 会被整条放行
+
+安装器会**逐条打印**它放进白名单的命令,你可以核对;含复合操作符的验证命令会被
+直接跳过并单独列出来。
+
+**它不能覆盖 `permissions.deny` / `ask` 规则** —— Claude Code 里 deny/ask 优先于
+hook 的返回值,所以不会削弱你已有的安全规则。删掉 hook 文件与 settings.json 里的
+条目即可完全回退。
+
+#### 其他项目也能用
+
+hook **捆绑在 SDD 技能里,但机制是通用的** —— 真正解决的是「auto 模式下 bash 审批
+整体失效」,这跟 SDD 没有必然关系。任何项目都可以单独装:
+
+```bash
+python <SDD技能目录>/scripts/install_hook.py --root <另一个项目根>
+```
+
+**不带 `--feature`** 就是纯通用模式:放行 git 的安全子命令与常见测试命令,
+不放行 rm / curl / git push / 任意 python。SDD 专属的那条(放行
+`skills/sdd/scripts/*.py`)在非 SDD 项目里匹配不到任何东西,无害。
+
+如果别的技能也想要同一套放行能力,直接复用这个 hook 即可 —— 它读的白名单文件
+(`sdd-hook-allow.json`)是可编辑的,加什么放什么。
 
 ---
 
@@ -165,6 +257,9 @@ python skills/sdd/scripts/verify_acceptance.py --feature user-auth
 
 # 导出为 OpenSpec 目录结构(生态互操作)
 python skills/sdd/scripts/export_openspec.py --feature user-auth
+
+# 装 PreToolUse hook(auto 模式下让 bash 照常执行;需手动跑一次)
+python skills/sdd/scripts/install_hook.py --root . --feature user-auth
 ```
 
 `validate_specs.py` 的检查项:
@@ -203,9 +298,11 @@ python skills/sdd/scripts/export_openspec.py --feature user-auth
 python tests/run_tests.py
 ```
 
-回归覆盖五个脚本的行为:结构校验、AC 可二值化、性能量化、DAG 无环、追溯闭合、
+回归覆盖脚本的行为:结构校验、AC 可二值化、性能量化、DAG 无环、追溯闭合、
 delta 影响面、阶段判定、幂等性、多 feature 共存、OpenSpec 导出、注释里的示例编号
-不被当成真实数据、§0 元信息、假设与开放问题分离,以及 as-is(现状逆向)模式的整套规则。
+不被当成真实数据、§0 元信息、假设与开放问题分离,as-is(现状逆向)模式的整套规则,
+以及 PreToolUse hook 的放行判定(复合操作符、路径穿越、git 子命令白名单)与
+安装器的幂等性。
 不依赖 pytest。
 
 ### 与 `/git` skill 衔接

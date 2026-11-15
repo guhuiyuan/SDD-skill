@@ -100,6 +100,16 @@ graph TD
 `validate_specs.py` 0 错误;每个 Task 都能被一个不看对话上下文的 AI 独立执行
 (有足够信息 + 有验证方式)。
 
+**校验怎么跑(两种走法,结果等价)**:
+
+- **脚本走法**:`python ${CLAUDE_SKILL_DIR}/scripts/validate_specs.py --feature <feature>`
+- **人工核对走法**(脚本被拒或不可用时):用 Read 读出 `specs/<feature>/tasks.md`,
+  对照上面的 Gate 清单逐条核对,把每条的结论(通过 / 不通过 / 不适用 / **未验证**)
+  和依据报给用户
+
+脚本走法更稳(不会漏看);人工走法在受限环境里可用。
+脚本被拒时按 SKILL.md「受限环境下的降级与解锁路径」的 AskUserQuestion 流程处理。
+
 ## 常见坑
 
 | 坑 | 表现 | 修正 |

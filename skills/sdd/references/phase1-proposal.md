@@ -144,12 +144,12 @@
 
 ### 6. 固化
 
-1. `python <skill目录>/scripts/init_specs.py <feature>`(若目录尚未创建)
+1. `python ${CLAUDE_SKILL_DIR}/scripts/init_specs.py <feature>`(若目录尚未创建)
 2. 写入 `specs/<feature>/proposal.md`
-3. `python <skill目录>/scripts/validate_specs.py --feature <feature>`
+3. `python ${CLAUDE_SKILL_DIR}/scripts/validate_specs.py --feature <feature>`
 4. 更新 §0 版本号为 `v0.1`
 5. **AskUserQuestion 确认后** git commit:`docs(spec): 完成 <feature> proposal v0.1`
-6. `python <skill目录>/scripts/update_claude_md.py --feature <feature>` 把规范注入 CLAUDE.md
+6. `python ${CLAUDE_SKILL_DIR}/scripts/update_claude_md.py --feature <feature>` 把规范注入 CLAUDE.md
 
 ## Gate 检查清单
 
@@ -177,6 +177,16 @@ as-is 模式额外:
 ## 完成判据
 
 `validate_specs.py` 对该 feature 的 proposal 部分 0 错误,且用户已确认定稿。
+
+**校验怎么跑(两种走法,结果等价)**:
+
+- **脚本走法**:`python ${CLAUDE_SKILL_DIR}/scripts/validate_specs.py --feature <feature>`
+- **人工核对走法**(脚本被拒或不可用时):用 Read 读出 `specs/<feature>/proposal.md`,
+  对照上面的 Gate 清单逐条核对,把每条的结论(通过 / 不通过 / 不适用 / **未验证**)
+  和依据报给用户
+
+脚本走法更稳(不会漏看);人工走法在受限环境里可用。
+脚本被拒时按 SKILL.md「受限环境下的降级与解锁路径」的 AskUserQuestion 流程处理。
 
 ## 常见坑
 

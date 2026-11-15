@@ -35,10 +35,23 @@ END = '<!-- SDD:END -->'
 RULE_BLOCK_RE = re.compile(
     re.escape(BEGIN) + r'(.*?)' + re.escape(END), re.S)
 
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SKILL_DIR = os.path.dirname(SCRIPT_DIR)
+
 AC_RE = re.compile(r'(?<![A-Za-z0-9])(AC-[FPE]-\d{3})(?![0-9])')
 ADR_RE = re.compile(r'(?<![A-Za-z0-9])(ADR-\d{3})(?![0-9])')
 TASK_RE = re.compile(r'(?<![A-Za-z0-9])(TASK-\d{3})(?![0-9])')
 COMMENT_RE = re.compile(r'<!--.*?-->', re.S)
+
+
+def script_path(name):
+    """脚本的绝对路径(正斜杠)。
+
+    区块里原来硬写 `~/.claude/skills/sdd/scripts/xxx.py`,有三个问题:
+    `~` 在 cmd.exe 里不展开、plugin/项目级安装的真实路径不是这个、
+    用户级 skill 目录和仓库目录是两个位置。写实际路径才保证"复制粘贴就能跑"。
+    """
+    return os.path.join(SCRIPT_DIR, name).replace('\\', '/')
 
 
 def strip_comments(text):
@@ -168,8 +181,13 @@ def build_block(root, feature, features=None):
     lines.append('2. 每个 Task 完成前必须跑通其「验证命令」；未通过不得推进到下游 Task。')
     lines.append('3. 不得擅自增加 `proposal.md` §2.1 之外的功能；需要新增时先改规范。')
     lines.append('4. 发现规范与实现冲突时，先停下并提出规范修改方案，经确认后再改代码。')
-    lines.append('5. 提交前跑 `~/.claude/skills/sdd/scripts/validate_specs.py --feature <feature>`')
+    lines.append('5. 提交前跑 `%s --feature <feature>`' % script_path('validate_specs.py'))
     lines.append('   （规范类）或该 Task 的验证命令（代码类）。')
+    lines.append('6. 上述命令若因环境限制无法执行（权限被拒），**不得默认通过**。按')
+    lines.append('   `%s/SKILL.md` 的「受限环境下的降级与解锁路径」处理：'
+                 % SKILL_DIR.replace('\\', '/'))
+    lines.append('   用 AskUserQuestion 引导（切模式后重试 / 用户手动跑并贴回输出 /')
+    lines.append('   跳过并标记待人工校验），被跳过的 Task 保持未勾选，结论标「未验证」。')
     lines.append(END)
     return '\n'.join(lines)
 

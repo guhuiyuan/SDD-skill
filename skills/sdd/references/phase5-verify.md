@@ -76,9 +76,14 @@ AI 给出**建议结论 + 依据**,人决定最终结论。不要自己宣布通
 ## 收尾
 
 1. 用 `assets/templates/acceptance-report.md` 生成报告
-2. **跑行为自检**:`python <skill目录>/scripts/verify_acceptance.py --feature <feature>`
+2. **跑行为自检**:`python ${CLAUDE_SKILL_DIR}/scripts/verify_acceptance.py --feature <feature>`
    —— 它会核对每条 AC 是否真的验过、结果是否与 tasks 的勾选状态一致、结论是否与实测相符。
    有错误就修报告或补验证,不要带着错提交。
+   > **脚本跑不了怎么办**:改用人工核对 —— 用 Read 读出验收报告,逐条核对
+   > 「每条 AC 都有回放行 / 结果列是 pass·fail·unknown / 标了通过的 AC 其覆盖
+   > Task 确实是 `[x]` / §5 性能实测覆盖全部 AC-P-* / 结论与实测一致」。
+   > 核不了的项标 **「未验证」**,并写进「有条件通过」的遗留项 —— **不得默认通过**。
+   > 脚本被拒时按 SKILL.md「受限环境下的降级与解锁路径」的 AskUserQuestion 流程处理。
 3. **AskUserQuestion 确认后** git commit 验收报告:
    `docs(spec): 完成 <feature> 验收报告 v1.0`
 4. 打 tag:`git tag -a v1.0-<feature> -m "<feature> 首版完成"`
