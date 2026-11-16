@@ -51,6 +51,9 @@
   (changelog 1353),而且不覆盖子 agent。所以放行规则必须装进项目的
   `.claude/settings.json`(见 `install_hook.py`),否则子 agent 的每条命令
   都会撞权限门,**并行直接失效**
+- **hook 也覆盖「派发」这一步**(第三组 matcher:`Agent|Task`)——
+  放行的只是派发动作;子 agent 内部跑命令仍走同一份白名单(它继承会话级设置)。
+  没有这一组,auto 模式下分类器不可达时,连派发都会被拒,这一节整个用不了
 
 ## 变更处理
 

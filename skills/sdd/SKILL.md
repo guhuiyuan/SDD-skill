@@ -212,9 +212,13 @@ Other actions that need the check will be denied too, and retrying won't help.
 ### 0. 先装 hook —— auto 模式下唯一能根治的办法
 
 本技能带了一个 PreToolUse hook,它跑在**任何权限模式检查之前**,返回 `allow`
-即可跳过权限检查 —— **纯本地机制,不经过服务端分类器**。装上之后 auto 模式
-照常可用,子 agent 也能正常并行(子 agent 继承的是会话级设置,不是技能的
-`allowed-tools`,所以只有装在 settings.json 里的 hook 才能覆盖到它们)。
+即可跳过权限检查 —— **纯本地机制,不经过服务端分类器**。装上之后 auto 模式下
+**跑命令**与**写项目内文件**都照常可用。
+
+> **hook 也管「派发子 agent」这一步**(第三组 matcher:`Agent|Task`)。
+> 放行的只是**派发动作**;子 agent 继承会话级设置,**内部**跑命令仍走这份
+> hook 白名单(Bash 只放白名单命令、写文件只放项目内),其他工具仍要服务端分类器。
+> 没有这一步,auto 模式下分类器不可达时连派发都会被拒,SDD 的并行实现没法用。
 
 一次性安装(在项目根目录跑):
 
@@ -226,21 +230,30 @@ python ${CLAUDE_SKILL_DIR}/scripts/install_hook.py --root . --feature <feature>
 `hooks.PreToolUse` 条目。**只动这一个键**,不碰你已有的 `permissions`;
 重复运行幂等。
 
-> **这一步需要用户手动跑一次。** `.claude/` 是受保护目录,AI 代跑会被权限门拦下。
-> 装完**新开一个会话**才生效(Claude Code 在会话启动时读 settings.json)。
+> **第一次安装需要用户手动跑一次。** `.claude/` 是受保护目录,AI 代跑会被权限门拦下。
+> 装完**通常不用重开会话**(实测 harness 会重读 settings.json;没生效再新开一个)。
+> 之后再升级 hook 可以交给 AI —— `install_hook.py` 本身就在 hook 的放行范围内。
 >
 > 不想写项目文件也可以用 `/hooks` 命令手动注册 —— 命令里填 hook 的**绝对路径**
 > (`python "<技能目录>/hooks/sdd_bash_allow.py"`)。注意 `${CLAUDE_SKILL_DIR}` 只在
 > 本技能的内容里会被替换,手工填的命令里它不会生效。
 
-hook 放行:SDD 自己的脚本、git 的安全子命令(status/diff/log/show/rev-parse/
-branch/add/commit)、常见测试命令(pytest / npm test / cargo test / go test),
-以及白名单文件里的额外命令。
+hook 放行:
+
+- SDD 自己的脚本(python + `skills/sdd/scripts/*.py` 或 `.claude/sdd/*.py`;
+  要求路径**整段**命中且落在可信根下)
+- git 的安全子命令(status/diff/log/show/rev-parse/branch/add/commit)
+- 常见测试命令(pytest / npm test / cargo test / go test)与白名单文件里的额外命令
+- **写文件**(Write / Edit / MultiEdit / NotebookEdit):目标在项目目录内;
+  路径里任何一段叫 `.claude` 或 `.git` 都不放行(留给人手动改)
 
 **不放行**:rm / curl / wget / sudo 等危险可执行文件(即使写进白名单也不放行)、
+**shell 与脚本解释器**(sh / bash / cmd / powershell / perl / node / npx /
+osascript …)与包装器(env / xargs)—— 它们能执行任意命令、`find -exec`、
 git push/reset/clean 与任何改变 git 行为的前置选项(`-c` 能定义 alias)、
-任意 python(`-c` / `-m 任意模块`)、太松的白名单模式、以及带 `&&` `;` `|` 等
-复合操作符的命令。
+任意 python(`-c` / `-m 任意模块`)、太松的白名单模式、带 `&&` `;` `|` 等
+复合操作符的命令、以及**任何位置**的命令替换(`$( )` 与反引号,包括藏在
+`cd <路径> &&` 的参数里)。
 
 它**不能覆盖** `permissions.deny` / `ask` 规则(deny/ask 优先),所以不会削弱
 已有的安全规则。安装器会逐条打印放进白名单的命令供你核对。
@@ -282,7 +295,7 @@ Phase 4 每个 Task 的「验证命令」是闭环的前提,**跑不了就停在
 
 | 用途 | 用什么 |
 |---|---|
-| 写规范、读代码 | Read / Write / Edit / Grep / Glob(本地文件工具,**不经分类器**) |
+| 写规范、读代码 | Read / Write / Edit / Grep / Glob(本地文件工具;auto 模式对它们有内建放行,hook 的路径判定是兜底) |
 | 跑校验脚本 | Bash(python …),或人工核对 |
 | 跑项目测试 | Bash(Phase 4 硬依赖) |
 | git 操作 | Bash(git …) |

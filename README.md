@@ -119,8 +119,12 @@ SDD 流程是 Bash 密集的(6 个 Python 脚本 + git + 每个 Task 一条验�
 
 本技能带一个 PreToolUse hook。它跑在**任何权限模式检查之前**,返回 `allow` 即可
 跳过权限检查 —— **纯本地机制,不经过服务端分类器**,所以端点透传不了分类器也不影响它。
-这也是**子 agent 能正常并行**的前提:子 agent 继承的是会话级设置,不是技能的
-`allowed-tools`,只有装在 `settings.json` 里的 hook 能覆盖到它们。
+子 agent 继承的是会话级设置,不是技能的 `allowed-tools`,所以装进
+`settings.json` 的 hook 也覆盖得到子 agent **内部**跑的命令。
+
+> **hook 也覆盖「派发子 agent」这一步**(第三组 matcher)。放行的只是**派发动作**;
+> 子 agent 继承会话级设置,**内部**跑命令仍走这份 hook 白名单,其他工具仍要服务端分类器。
+> 没有这一步,auto 模式下分类器不可达时连派发都会被拒,SDD 的并行实现就没法用。
 
 在项目根目录跑一次:
 
@@ -146,6 +150,7 @@ python <技能目录>/scripts/install_hook.py --root . --feature <feature>
 |---|---|
 | `Bash` | 命令白名单(下表) |
 | `Write\|Edit\|MultiEdit\|NotebookEdit` | **路径**:目标在项目目录内 |
+| `Agent\|Task` | 放行**派发子 agent**这一步;子 agent 内部仍走同一份白名单 |
 
 > **第一次安装需要你手动跑一次**:那时还没有 hook,`.claude/` 这个受保护目录只能你来写。
 > 装完之后**升级/重装可以交给 AI** —— `python <技能目录>/scripts/install_hook.py`
@@ -161,24 +166,33 @@ python <技能目录>/scripts/install_hook.py --root . --feature <feature>
 
 **放行范围**:SDD 自己的脚本、git 的安全子命令(status/diff/log/show/rev-parse/
 branch/add/commit)、常见测试命令(pytest / npm test / cargo test / go test),
-白名单文件里的额外命令,以及**项目目录内的文件写入**(Write / Edit /
-MultiEdit / NotebookEdit)。
+白名单文件里的额外命令、**项目目录内的文件写入**(Write / Edit /
+MultiEdit / NotebookEdit),以及**派发子 agent**(Agent / Task)。
 
 > 写文件这一组是按**路径**判定的:目标在项目目录内就放行。想收紧就在白名单文件里填
-> `"write_paths": ["specs", "src"]`(相对项目根的子路径),留空 = 整个项目目录。
+> `"write_paths": ["specs", "src"]`(相对项目根的子路径),留空 = 整个项目目录;
+> 写成一堆空串则**一律不放行**(fail-closed)。
 >
-> **项目内的 `.claude/` 与 `.git/` 永远不放行** —— 前者能给自己授权权限,后者能改
+> **路径里任何一段叫 `.claude` 或 `.git` 都不放行** —— 前者能给自己授权权限,后者能改
 > git 的 hook 与配置,这两处留给人手动改。
+>
+> 补充:auto 模式对写文件本来有内建短路(「若在 acceptEdits 模式下会被放行」),
+> hook 的路径判定是**兜底**;分类器不可达时它才真正起作用。
 
 **不放行**:
 
 - rm / curl / wget / sudo / chmod 等危险可执行文件 —— **即使你写进白名单也不放行**
+- **shell 与脚本解释器**(sh / bash / cmd / powershell / perl / ruby / node / npx /
+  osascript / wscript …)与**包装器**(env / xargs)—— 它们能执行任意命令,
+  白名单里写一条 `sh -c "任意命令"` 就是开后门
+- `find` 带 `-exec` / `-delete`
 - git push / reset / clean,以及任何会改变 git 行为的**前置选项**
   (`-c` 能定义 alias 把"安全子命令"换成任意 shell;`--exec-path` 能换掉子命令查找路径)
 - 任意 python(`python -c` / `python -m 任意模块`);解释器必须钉死脚本
-- 太松的白名单模式(例如白名单里只写一条 `python`)
+- 太松的白名单模式(例如白名单里只写一条 `python` 或一条 `sh`)
 - 带 `&&` `;` `|` 等复合操作符的命令 —— 否则 `python 某脚本 && rm -rf /` 会被整条放行
-- **项目目录外**的文件写入,以及项目内 `.claude/` / `.git/` 里的写入
+- **任何位置**的命令替换(`$( )` 与反引号),包括藏在 `cd <路径> &&` 的参数里
+- **项目目录外**的文件写入,以及路径里带 `.claude` / `.git` 的写入
 
 安装器会**逐条打印**它放进白名单的命令,你可以核对;含复合操作符的验证命令会被
 直接跳过并单独列出来。
