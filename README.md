@@ -52,6 +52,19 @@ Windows(Git Bash):
 cp -r skills/sdd "$HOME/.claude/skills/sdd"
 ```
 
+**想保持单一来源**(仓库改了用户级立刻跟着变,不用重新拷贝),把用户级目录做成
+指向仓库的**符号链接 / 目录联接**:
+
+```bash
+mkdir -p ~/.claude/skills
+ln -s "$PWD/skills/sdd" ~/.claude/skills/sdd          # Git Bash / macOS / Linux
+# Windows(cmd,需管理员或开发者模式):
+# mklink /J "%USERPROFILE%\.claude\skills\sdd" "%CD%\skills\sdd"
+```
+
+> 目标**已经是**链接时不要再对它 `cp -r` —— 那是把源目录拷进自己
+> (报 "cannot copy a directory into itself"),无害但没意义。
+
 ### 方式三:项目级 skill(随仓库分发,团队共享)
 
 ```bash
@@ -59,6 +72,10 @@ cp -r skills/sdd <your-project>/.claude/skills/sdd
 ```
 
 安装后重启 Claude Code(或执行 `/reload-skills`)。
+
+> **技能是全局的,hook 是项目级的。** 技能装到用户级后所有项目都能用 `/sdd`;
+> 但每个项目的 auto 模式放行机制要在**那个项目里**各装一次
+> (见下文「装 PreToolUse hook」)。
 
 **依赖**:Python 3.7+(仅用标准库,用于三个辅助脚本)。不装也能用——脚本只是可选的校验与脚手架。
 
