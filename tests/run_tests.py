@@ -685,6 +685,17 @@ def run(script, *args):
     return p.returncode, (p.stdout or '') + (p.stderr or '')
 
 
+def run_hook(payload, hook_path=None, env=None):
+    """像 harness 那样喂一份 JSON 给 hook,返回 (stdout 字节, stderr 文本)。"""
+    path = hook_path or os.path.join(SKILL, 'hooks', 'sdd_bash_allow.py')
+    environ = dict(os.environ)
+    environ.update(env or {})
+    proc = subprocess.run([sys.executable, path],
+                          input=json.dumps(payload).encode('utf-8'),
+                          capture_output=True, env=environ, timeout=60)
+    return proc.stdout, (proc.stderr or b'').decode('utf-8', 'replace')
+
+
 def make_project(base, feature='demo', files=None):
     d = os.path.join(base, 'specs', feature)
     os.makedirs(d, exist_ok=True)
@@ -1169,6 +1180,77 @@ def test_hook_and_installer(tmp):
                         write_paths=['.']))
     check('推断不出项目根时不放行',
           hook.evaluate_tool('Write', {'file_path': 'x.py'}, root='') is None)
+    check('放行派发子 agent(Agent)',
+          hook.evaluate_tool('Agent', {'description': 'do it'}, root=root) is not None)
+    check('放行派发子 agent(Task 旧名)',
+          hook.evaluate_tool('Task', {'description': 'do it'}, root=root) is not None)
+    check('write_paths 全是空串时 fail-closed(不放行)',
+          not can_write('Write', os.path.join(root, 'src', 'x.py'),
+                        write_paths=['', '   ']))
+    check('tools 里写 Write 也不能绕过路径判定',
+          hook.evaluate_tool('Write', {'file_path': os.path.join(root, '.claude', 'settings.json')},
+                             tools=['Write'], root=root) is None)
+
+    # --- 命令替换藏在 cd 参数里(剥掉 cd 前缀后会逃过检查)---
+    check('不放行 cd 参数里的命令替换',
+          not hit('cd $(whoami) && pytest'))
+    check('不放行 cd 参数里的反引号',
+          not hit('cd `whoami` && pytest'))
+    check('不放行 cd 参数里的命令替换(无空格)',
+          not hit('cd $(whoami)&&pytest'))
+
+    # --- 危险包装器:只查 argv[0] 时白名单里写一条 sh -c 就开后门 ---
+    for wrapper in ('sh', 'bash', 'cmd', 'powershell', 'pwsh', 'perl', 'ruby',
+                    'node', 'npx', 'osascript', 'wscript', 'env', 'xargs'):
+        check('不放行 %s(即使写进白名单)' % wrapper,
+              hook.evaluate('%s -c "rm -rf /"' % wrapper,
+                            extra=['%s -c "rm -rf /"' % wrapper]) is None)
+    check('不放行 find -exec',
+          hook.evaluate('find . -exec rm {} +', extra=['find']) is None)
+    check('放行普通 find',
+          hook.evaluate('find . -name "*.py"', extra=['find']) is not None)
+
+    # --- 路径子串命中:任何目录里带 skills/sdd/scripts 都不算自家脚本 ---
+    check('不放行子串路径伪装成 SDD 脚本',
+          not hit('python /tmp/evil/skills/sdd/scripts/payload.py'))
+
+    # --- hook 的 stdout 形状(改坏 emit_allow 时测试必须能发现)---
+    repo_root = os.path.dirname(os.path.dirname(SKILL))
+    sdd_script = os.path.join(repo_root, 'skills', 'sdd', 'scripts', 'init_specs.py')
+    allow_out, allow_err = run_hook({'tool_name': 'Bash',
+                                     'tool_input': {'command': 'python "%s" --help' % sdd_script}})
+    check('放行时 stdout 以 { 开头',
+          allow_out.startswith(b'{'), repr(allow_out[:120]))
+    check('放行时 stdout 是纯 ASCII(Windows 上 GBK 会让 harness 读成乱码)',
+          allow_out.isascii(), repr(allow_out[:120]))
+    try:
+        parsed = json.loads(allow_out.decode('ascii'))
+        decision = parsed.get('hookSpecificOutput', {}).get('permissionDecision')
+        check('放行时 permissionDecision 是 allow', decision == 'allow', repr(decision))
+        check('放行时带 hookEventName',
+              parsed.get('hookSpecificOutput', {}).get('hookEventName') == 'PreToolUse',
+              repr(parsed)[:200])
+    except Exception as exc:
+        check('放行时 stdout 能被 json.loads 解析', False, repr(exc))
+    check('放行时 stderr 为空', allow_err.strip() == '', allow_err[:200])
+
+    deny_out, deny_err = run_hook({'tool_name': 'Bash',
+                                   'tool_input': {'command': 'python -c "print(1)"'}})
+    check('未命中时 stdout 完全为空(不能有半截 JSON)',
+          deny_out == b'', repr(deny_out[:120]))
+    check('未命中时 stderr 为空', deny_err.strip() == '', deny_err[:200])
+
+    # --- 写文件的放行也要进审计日志 ---
+    audit_dir = os.path.join(tmp, 'hook-audit')
+    os.makedirs(audit_dir, exist_ok=True)
+    hook_copy = os.path.join(audit_dir, 'sdd_bash_allow.py')
+    shutil.copyfile(os.path.join(SKILL, 'hooks', 'sdd_bash_allow.py'), hook_copy)
+    run_hook({'tool_name': 'Write',
+              'tool_input': {'file_path': os.path.join(audit_dir, 'x.txt')}},
+             hook_path=hook_copy,
+             env={'SDD_HOOK_LOG': '1', 'CLAUDE_PROJECT_DIR': audit_dir})
+    check('写文件放行也进审计日志',
+          os.path.isfile(os.path.join(audit_dir, 'sdd-hook-audit.log')))
 
     # --- 安装器 ---
     base = os.path.join(tmp, 'hook-install')
@@ -1217,9 +1299,10 @@ def test_hook_and_installer(tmp):
     ours = [e for e in pre2
             if any('sdd_bash_allow.py' in str(h.get('command', ''))
                    for h in (e.get('hooks') or []))]
-    check('重复安装不产生重复条目', len(ours) == 2, json.dumps(pre2)[:300])
-    check('注册了 Bash 与写文件两组 matcher',
-          sorted(str(e.get('matcher')) for e in ours) == ['Bash', 'Write|Edit|MultiEdit|NotebookEdit'],
+    check('重复安装不产生重复条目', len(ours) == 3, json.dumps(pre2)[:300])
+    check('注册了 Bash、写文件与派发三组 matcher',
+          sorted(str(e.get('matcher')) for e in ours) ==
+          ['Agent|Task', 'Bash', 'Write|Edit|MultiEdit|NotebookEdit'],
           json.dumps([e.get('matcher') for e in ours]))
     with io.open(os.path.join(base, '.claude', 'hooks', 'sdd-hook-allow.json'),
                  encoding='utf-8') as fh:
@@ -1257,8 +1340,8 @@ def test_hook_and_installer(tmp):
              for h in (e.get('hooks') or [])]
     check('同组里用户自己的 hook 没被删', 'my-own-hook.sh' in cmds3, json.dumps(cmds3))
     check('别的 matcher 组没被动', 'other.sh' in cmds3, json.dumps(cmds3))
-    check('我们的 hook 注册了两组(Bash + 写文件)',
-          sum(1 for c in cmds3 if 'sdd_bash_allow.py' in c) == 2, json.dumps(cmds3))
+    check('我们的 hook 注册了三组(Bash + 写文件 + 派发)',
+          sum(1 for c in cmds3 if 'sdd_bash_allow.py' in c) == 3, json.dumps(cmds3))
 
     # ② 结构不对就拒绝覆盖,别把用户的东西抹掉
     base4 = os.path.join(tmp, 'hook-badshape')

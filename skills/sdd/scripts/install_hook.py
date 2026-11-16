@@ -19,11 +19,14 @@ PreToolUse hook 跑在**任何权限模式检查之前**,返回 ``permissionDeci
 2. ``<root>/.claude/hooks/sdd-hook-allow.json`` —— 可编辑的白名单
 3. ``<root>/.claude/settings.json`` 的 ``hooks.PreToolUse`` —— 注册 hook
 
-注册**两组** matcher:
+注册**三组** matcher:
 
 - ``Bash`` —— 按命令白名单放行(SDD 脚本 / git 安全子命令 / extra 列表)
 - ``Write|Edit|MultiEdit|NotebookEdit`` —— 按**路径**放行:目标在项目目录内就放行,
   项目内的 ``.claude/`` 与 ``.git/`` 仍然不放行(改权限、改 git 配置留给人手动做)
+- ``Agent|Task`` —— 放行"派发子 agent"这一步(auto 模式下分类器不可达时,
+  连派发都会被拒,SDD 的并行实现就没法用)。子 agent **内部**跑命令仍走同一份
+  白名单 —— 它继承的是会话级设置,hook 照样管得住。
 
 只动 ``hooks.PreToolUse``,**不碰 settings.json 里已有的 permissions 等其他键**。
 重复运行是幂等的。**不会删除用户自己注册的 hook** —— 同组里别人的 hook 原样留着。
@@ -73,6 +76,10 @@ HOOK_MARKER = 'sdd_bash_allow.py'
 # 写文件类工具的 matcher —— Claude Code 的 matcher 是正则,一次覆盖四个工具。
 # 放行与否只看路径(项目目录内),不看工具名。
 WRITE_MATCHER = 'Write|Edit|MultiEdit|NotebookEdit'
+
+# 派发子 agent 的 matcher —— 放行"派发"这一步。
+# 子 agent 内部跑命令仍走同一份白名单,其他工具仍要服务端分类器。
+AGENT_MATCHER = 'Agent|Task'
 
 # tasks.md 里的「验证命令」字段:- **验证命令**: `命令`
 # 校验器(validate_specs.py)的 field_value 不要求反引号,这里也要能吃下无反引号的写法
@@ -209,11 +216,12 @@ def _hook_entry(matcher, python_exe, root, portable=False):
 def hook_entries(python_exe, root, portable=False):
     """本工具注册的全部 PreToolUse 条目。
 
-    两组:Bash(按命令白名单放行)+ 写文件工具(按路径放行)。
-    Claude Code 的 matcher 支持正则,所以写文件那组一次覆盖四个工具。
+    三组:Bash(按命令白名单放行)+ 写文件工具(按路径放行)+ 派发子 agent。
+    Claude Code 的 matcher 支持正则,所以后两组一次覆盖多个工具。
     """
     return [_hook_entry('Bash', python_exe, root, portable),
-            _hook_entry(WRITE_MATCHER, python_exe, root, portable)]
+            _hook_entry(WRITE_MATCHER, python_exe, root, portable),
+            _hook_entry(AGENT_MATCHER, python_exe, root, portable)]
 
 
 def is_our_hook(h):
@@ -403,11 +411,15 @@ def main(argv=None):
     print('  - 白名单里的额外命令(%s)' % ALLOWLIST_NAME)
     print('  - 写文件工具(Write/Edit/MultiEdit/NotebookEdit):**目标在项目目录内**')
     print('    (项目内的 .claude/ 与 .git/ 仍然不放行 —— 改权限和改 git 配置留给人手动做)')
+    print('  - 派发子 agent(Agent/Task):只放行"派发"这一步,')
+    print('    子 agent 内部跑命令仍走同一份白名单')
     if allowlist.get('write_paths'):
         print('    只限这些子路径: %s' % ', '.join(allowlist['write_paths']))
     print('')
-    print('不放行 rm / curl / git push / 任意 python;带 && ; | 等复合操作符的命令也不放行。')
-    print('项目目录外的文件写入不放行。')
+    print('不放行 rm / curl / git push / 任意 python;')
+    print('也不放行 shell 与脚本解释器(sh / bash / cmd / powershell / node / npx …)、')
+    print('包装器(env / xargs)、find -exec、带 && ; | 的复合命令、以及任何位置的命令替换。')
+    print('项目目录外的文件写入不放行;路径里带 .claude 或 .git 的写入也不放行。')
     print('本 hook 的 allow 不能覆盖 permissions.deny / ask 规则 —— deny/ask 优先。')
     print('你自己注册的其它 hook 不会被删。')
     print('')

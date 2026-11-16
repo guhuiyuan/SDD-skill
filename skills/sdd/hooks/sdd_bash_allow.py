@@ -49,40 +49,61 @@ PreToolUse hook 跑在**任何权限模式检查之前**,它返回 ``permissionD
 - 命中白名单 → stdout 输出 ``permissionDecision: allow``,exit 0
 - 未命中     → **不输出任何内容**,exit 0(交回正常权限流程)
 
+输出**必须是纯 ASCII**(json.dumps(..., ensure_ascii=True)):Windows 上 Python 的
+stdout 默认是 GBK,中文理由会变成 GBK 字节,harness 按 UTF-8 读就是乱码 ——
+实测出现过「Hook output does not start with {, treating as plain text」。
+
 **任何异常都不向外抛** —— hook 崩了会把整个会话搞挂,宁可什么都不做。
 
 ## 写文件工具(Write / Edit / MultiEdit / NotebookEdit)
 
-auto 模式把写文件也交给服务端分类器 → 分类器不可达时**连改代码都做不了**
-(SDD 的「照规范实现」阶段直接卡住)。所以本 hook 也管写文件,判定只看**路径**:
+auto 模式下写文件本来有内建短路(「若在 acceptEdits 模式下会被放行」),
+本 hook 的路径判定是**兜底**:分类器不可达时也能写项目内的文件。判定只看**路径**:
 
 - 目标在**项目目录内** → 放行
 - 目标在项目目录外 → 不放行
-- 目标在项目内的 **``.claude/``** 或 **``.git/``** 里 → **不放行**
+- 路径里**任何一段**叫 **``.claude``** 或 **``.git``** → **不放行**
   (``.claude/settings.json`` 能给自己授权权限,``.git/config`` 能改 hook —— 这两处
   必须留给人手动改,不能由 AI 自动放行)
-- 白名单文件里写了 ``"write_paths"`` → 只放行这些子路径(相对项目根或绝对路径)
+- 白名单文件里写了 ``"write_paths"`` → 只放行这些子路径(相对项目根或绝对路径);
+  写成一堆空串时**一律不放行**(fail-closed)
 
 项目根怎么来:``CLAUDE_PROJECT_DIR`` 环境变量优先;没有就从 hook 自身路径往上找
 **含 ``.claude/`` 的那一层**(装在 ``<项目>/.claude/hooks/`` 下时正好是项目根)。
 两个都拿不到 → **不放行**(失败时收紧,不是放宽)。
 
+## 派发子 agent(Agent / Task)
+
+auto 模式下「派发子 agent」这一步本身也要服务端分类器 → 分类器不可达时
+**连派发都被拒**(实测「Agent tool permission denied」),SDD 的并行实现/校验
+就没法用。所以 hook 也放行这一步。
+
+放行的只是**派发动作**:子 agent 继承会话级设置,**内部**跑命令仍走这份白名单
+(Bash 只放白名单命令、写文件只放项目内),其他工具仍要服务端分类器。
+
 ## 白名单(保守)
 
-1. SDD 技能自己的脚本:python 解释器 + 路径含 ``skills/sdd/scripts/`` 或
-   ``.claude/sdd/`` 的 ``.py`` 文件(路径片段匹配,与安装方式无关)
+1. SDD 技能自己的脚本:python 解释器 + 路径**整段**命中 ``skills/sdd/scripts/``
+   或 ``.claude/sdd/`` 的 ``.py`` 文件,**且**落在可信根(项目根 / 工作目录 /
+   ``~/.claude``)下 —— 子串比对会让 ``/tmp/evil/skills/sdd/scripts/x.py`` 蒙混过关
 2. git 的安全子命令:status/diff/log/show/rev-parse/branch/add/commit
 3. 额外命令:读 ``sdd-hook-allow.json`` 的 ``extra`` 列表(前缀匹配)
 
 **不放行**:
 
 - rm / curl / wget / sudo / chmod 等危险可执行文件 —— **即使写进白名单也不放行**
+- **shell 与脚本解释器**(sh / bash / cmd / powershell / perl / ruby / node / npx /
+  osascript / wscript …)与**包装器**(env / xargs):它们能执行任意命令,
+  白名单里写一条 ``sh -c "任意命令"`` 就是开后门
+- ``find`` 带 ``-exec`` / ``-delete``
 - git push / reset / clean,以及任何会改变 git 行为的**前置选项**
   (``-c`` 能定义 alias、``--exec-path`` 能换掉子命令查找路径)
 - 任意 python(``python -c`` / ``python -m 任意模块``);解释器必须钉死脚本
-- 太松的白名单模式(例如白名单里写一条 ``python``)
-- 带 shell 复合操作符的命令(``&&`` ``||`` ``;`` ``|`` ``&`` 重定向 命令替换)
+- 太松的白名单模式(例如白名单里写一条 ``python`` 或一条 ``sh``)
+- 带 shell 复合操作符的命令(``&&`` ``||`` ``;`` ``|`` ``&`` 重定向)
   —— 否则 ``python 某脚本 && rm -rf /`` 会被整条放行
+- **命令替换**(``$( )`` 与反引号)—— 在**整条命令**上查,包括 ``cd`` 的参数里:
+  ``cd $(whoami) && pytest`` 曾经在剥掉 cd 前缀后逃过检查
 
 ## 安全边界
 
@@ -100,8 +121,16 @@ import sys
 ALLOWLIST_FILE = 'sdd-hook-allow.json'
 AUDIT_FILE = 'sdd-hook-audit.log'
 
-# SDD 脚本所在目录(路径片段匹配,与用户级/plugin/项目级安装方式无关)
-SCRIPT_DIR_MARKERS = ('skills/sdd/scripts/', '.claude/sdd/')
+# SDD 脚本所在目录 —— 按**目录段**匹配,不是子串匹配。
+#
+# 「子串匹配」是实测出来的洞:`python /tmp/evil/skills/sdd/scripts/payload.py`
+# 因为路径里含有 "skills/sdd/scripts/" 就被当成 SDD 脚本放行了。
+# 现在要求这几个词各自独立成段,并且脚本必须落在**可信根**下
+# (项目根 / 当前工作目录 / 用户的 ~/.claude),见 trusted_roots()。
+SCRIPT_DIR_SEGMENTS = (
+    ('skills', 'sdd', 'scripts'),
+    ('.claude', 'sdd'),
+)
 
 # git 的安全子命令 —— 刻意不含 push / remote / reset / clean
 GIT_SAFE_SUBCOMMANDS = frozenset({
@@ -124,12 +153,30 @@ DEFAULT_EXTRA = (
 # 危险可执行文件 —— 即使用户把它写进白名单也不放行。
 # hook 对外承诺「不放行 rm / curl / git push / 任意 python」,这句承诺必须成立:
 # 白名单是用户可编辑的,不能让它变成绕过承诺的后门。
+#
+# 名单里必须包含**能执行任意命令的壳与解释器**:只查 argv[0] 时,
+# 白名单里写一条 `sh -c "rm -rf /"` 就能整条放行(实测)。
+#
+# 说明:白名单是**前缀**匹配,所以「timeout 300 pytest」这类前缀仍然钉死;
+# 真正危险的是"短前缀 + 能吃命令字符串"的那些 —— 它们在下面。
 DENIED_EXECUTABLES = frozenset({
-    'rm', 'rmdir', 'del', 'mkfs', 'dd', 'shred',
-    'sudo', 'su', 'chmod', 'chown', 'chgrp',
-    'curl', 'wget', 'nc', 'ncat', 'socat', 'telnet',
-    'powershell', 'pwsh', 'cmd',
+    # 删文件 / 改权限
+    'rm', 'rmdir', 'del', 'erase', 'mkfs', 'dd', 'shred', 'format', 'diskpart',
+    'sudo', 'su', 'doas', 'chmod', 'chown', 'chgrp',
+    # 网络 / 远程
+    'curl', 'wget', 'nc', 'ncat', 'socat', 'telnet', 'ssh', 'scp', 'sftp',
+    # shell(能跑任意命令)
+    'sh', 'bash', 'zsh', 'dash', 'ksh', 'csh', 'tcsh', 'fish', 'busybox', 'cmd',
+    'powershell', 'pwsh', 'eval', 'exec', 'source', 'command',
+    # 脚本解释器
+    'perl', 'ruby', 'php', 'node', 'npx', 'deno', 'bun', 'osascript',
+    'wscript', 'cscript', 'mshta', 'rundll32', 'regsvr32', 'wine',
+    # 包装器
+    'env', 'xargs',
 })
+
+# find 本身常用(找文件),但 -exec / -delete 能执行命令 → 见到这些参数就拒
+FIND_EXEC_FLAGS = ('-exec', '-execdir', '-ok', '-okdir', '-delete')
 
 # git 唯一允许出现在子命令**之前**的选项 —— 只改工作目录,无害。
 #
@@ -150,6 +197,14 @@ PYTHON_VALUE_OPTIONS = frozenset({'-X', '-W', '--check-hash-based-pycs'})
 
 # 带文件路径的工具 —— 放行与否只看路径,不看命令
 PATH_TOOLS = ('Write', 'Edit', 'MultiEdit', 'NotebookEdit')
+
+# 派发子 agent 的工具 —— 放行的是**派发动作**这一步。
+#
+# 子 agent 继承会话级设置,所以它**内部**跑的命令仍然走同一份白名单
+# (Bash 只放白名单命令、写文件只放项目内),其他工具仍要服务端分类器。
+# 没有这一步,auto 模式下分类器不可达时连"派发"都会被拒(实测
+# 「Agent tool permission denied」),SDD 的并行实现/校验就没法用。
+AGENT_TOOLS = ('Agent', 'Task')
 
 # 项目目录内也不自动放行的子目录:
 #   .claude/ —— settings.json 能给自己授权权限
@@ -189,15 +244,83 @@ def tokenize(cmd):
     return tokens
 
 
-def has_unsafe_operators(cmd):
-    """命令里有没有 shell 复合操作符。
+def canon_path(path):
+    """把路径规范化成可比对的字符串。
 
-    ``$(`` 与反引号在任何位置都算不安全 —— 它们在双引号里照样会被执行。
-    其余的 ``& | ; > <`` 只在引号外才算,这样 ``git commit -m "fix -> bug"``
-    不会被误杀。
+    解析软链接/目录联接(realpath),统一大小写与分隔符 —— 这样
+    ``<项目>/a/../../etc`` 与 ``<项目>/link -> C:\\Windows`` 都会露馅。
     """
-    if '`' in cmd or '$(' in cmd:
+    if not isinstance(path, str) or not path.strip():
+        return ''
+    try:
+        real = os.path.realpath(os.path.abspath(os.path.expanduser(path)))
+    except Exception:
+        return ''
+    text = os.path.normcase(real).replace('\\', '/')
+    if len(text) > 1 and text.endswith('/'):
+        text = text[:-1]
+    return text
+
+
+def within(root, target):
+    """target 是否在 root 之内(root 自身也算)。"""
+    if not root or not target:
+        return False
+    if target == root:
         return True
+    return target.startswith(root + '/')
+
+
+def contains_segments(path, segments):
+    """路径里是否含有一段**连续的目录段**(整段比对,不是子串)。
+
+    ``skills/sdd/scripts`` 只在真的是这三个目录时才命中 ——
+    子串比对会让 ``/tmp/evil/skills/sdd/scripts/x.py`` 也算命中。
+    """
+    parts = [p for p in path.replace('\\', '/').split('/') if p]
+    want = tuple(segments)
+    for i in range(len(parts) - len(want) + 1):
+        if tuple(parts[i:i + len(want)]) == want:
+            return True
+    return False
+
+
+def trusted_roots():
+    """可信根:「SDD 自己的脚本」必须落在这些目录下面。
+
+    - 项目根(hook 自己所在位置往上找含 .claude/ 的那一层)
+    - 当前工作目录(从子目录启动时的兜底)
+    - 用户的 ``~/.claude``(用户级 / plugin 安装的技能都在这下面)
+
+    没有可信根这一层,路径里带 ``skills/sdd/scripts/`` 的**任意**文件
+    都会被当成自家脚本放行(实测:/tmp/evil/skills/sdd/scripts/x.py)。
+    """
+    roots = []
+    for path in (project_root(), os.getcwd(),
+                 os.path.join(os.path.expanduser('~'), '.claude')):
+        if not path:
+            continue
+        cand = canon_path(path)
+        if cand and cand not in roots:
+            roots.append(cand)
+    return roots
+
+
+def has_substitution(cmd):
+    """命令里有没有命令替换 —— ``$(`` 与反引号,在**任何位置**都算不安全。
+
+    必须在剥掉 ``cd <路径> &&`` 之前查:命令替换藏在 cd 的参数里时
+    (例如 ``cd $(whoami) && pytest``),剥掉前缀之后就看不见了 —— 实测会被放行。
+    双引号里照样会被 shell 展开,所以引号内外一律算不安全。
+    """
+    return '`' in cmd or '$(' in cmd
+
+
+def has_compound_operators(cmd):
+    """命令里有没有 shell 复合操作符(``& | ; > <``)。
+
+    只在引号外才算,这样 ``git commit -m "fix -> bug"`` 不会被误杀。
+    """
     quote = None
     for ch in cmd:
         if quote:
@@ -211,6 +334,11 @@ def has_unsafe_operators(cmd):
             elif ch in '\n\r':
                 return True
     return False
+
+
+def has_unsafe_operators(cmd):
+    """命令替换 + 复合操作符(保留旧名,给外部调用方用)。"""
+    return has_substitution(cmd) or has_compound_operators(cmd)
 
 
 _CD_PREFIX = re.compile(
@@ -227,7 +355,14 @@ def strip_leading_cd(cmd):
 
 
 def match_sdd_script(tokens):
-    """命令行是否是"python 解释器 + SDD 自己的脚本"。命中返回脚本路径。"""
+    """命令行是否是"python 解释器 + SDD 自己的脚本"。命中返回脚本路径。
+
+    两道关:
+    1. 目录名要**整段**命中 skills/sdd/scripts(或 .claude/sdd)—— 子串比对
+       会让 /tmp/evil/skills/sdd/scripts/x.py 也算命中(实测)。
+    2. 脚本必须落在**可信根**下(项目根 / 工作目录 / ~/.claude)——
+       否则任何路径里带这个目录名的文件都会被当成自家脚本。
+    """
     if len(tokens) < 2 or not _is_python_exe(tokens[0]):
         return None
     rest = tokens[1:]
@@ -240,13 +375,15 @@ def match_sdd_script(tokens):
         return None
     cand = rest[idx]
     # 归一化后再比对,免得 `skills/sdd/scripts/../../evil.py` 这类路径穿越蒙混过关
-    norm = os.path.normpath(cand).replace('\\', '/')
-    if not norm.endswith('.py'):
+    norm = canon_path(cand)
+    if not norm or not norm.endswith('.py'):
         return None
-    for marker in SCRIPT_DIR_MARKERS:
-        if marker in norm:
-            return norm
-    return None
+    if not any(contains_segments(norm, segs) for segs in SCRIPT_DIR_SEGMENTS):
+        return None
+    if not any(within(root, norm) for root in trusted_roots()):
+        return None
+    # 展示用原始大小写(canon_path 会把 Windows 路径转小写,看着不像真路径)
+    return os.path.normpath(cand).replace('\\', '/')
 
 
 def match_git(tokens):
@@ -338,6 +475,8 @@ def pattern_is_loose(pattern):
 
     例如白名单里写一条 ``python`` —— 它能前缀匹配 ``python -c "任意代码"``,
     等于开了一个后门。解释器要么钉死脚本、要么钉死模块名,才算合格的模式。
+
+    危险可执行文件开头的模式同样算太松:``sh`` 会前缀匹配 ``sh -c "任意命令"``。
     """
     parts = pattern.split()
     if not parts:
@@ -345,6 +484,8 @@ def pattern_is_loose(pattern):
     exe = os.path.basename(parts[0]).lower()
     if exe.endswith('.exe'):
         exe = exe[:-4]
+    if exe in DENIED_EXECUTABLES:
+        return True              # 'sh' / 'bash' / 'env' / 'rm' … 一律跳过
     if exe in PYTHON_EXACT or any(exe.startswith(p) for p in PYTHON_PREFIX):
         if len(parts) == 1:
             return True          # 'python'
@@ -379,33 +520,6 @@ def match_extra(command, tokens, extra):
 
 # ---------- 写文件工具(Write / Edit / MultiEdit / NotebookEdit) ----------
 
-def canon_path(path):
-    """把路径规范化成可比对的字符串。
-
-    解析软链接/目录联接(realpath),统一大小写与分隔符 —— 这样
-    ``<项目>/a/../../etc`` 与 ``<项目>/link -> C:\\Windows`` 都会露馅。
-    """
-    if not isinstance(path, str) or not path.strip():
-        return ''
-    try:
-        real = os.path.realpath(os.path.abspath(os.path.expanduser(path)))
-    except Exception:
-        return ''
-    text = os.path.normcase(real).replace('\\', '/')
-    if len(text) > 1 and text.endswith('/'):
-        text = text[:-1]
-    return text
-
-
-def within(root, target):
-    """target 是否在 root 之内(root 自身也算)。"""
-    if not root or not target:
-        return False
-    if target == root:
-        return True
-    return target.startswith(root + '/')
-
-
 def project_root():
     """推断项目根目录;推断不出来返回 ''。
 
@@ -430,34 +544,36 @@ def project_root():
 
 
 def write_allowed(file_path, root, write_paths=None):
-    """写入目标是否允许。"""
+    """写入目标是否允许。
+
+    ``write_paths`` 给定时只放行这些子路径;**给了一堆空串时一律拒绝**
+    (fail-closed:配置写坏了不能变成"整个项目目录都能写")。
+    """
     if not file_path or not root:
         return False
     root = canon_path(root)
     target = canon_path(file_path)
     if not root or not target:
         return False
-    roots = []
-    for extra in (write_paths or []):
-        text = str(extra).strip()
-        if not text:
-            continue
-        cand = canon_path(text if os.path.isabs(text) else os.path.join(root, text))
-        if cand:
-            roots.append(cand)
-    if not roots:
-        # 没指定子路径 = 整个项目目录
-        roots = [root]
-    hit = None
-    for r in roots:
-        if within(r, target):
-            hit = r
-            break
-    if hit is None:
+    if write_paths:
+        roots = []
+        for extra in write_paths:
+            text = str(extra).strip()
+            if not text:
+                continue
+            cand = canon_path(text if os.path.isabs(text) else os.path.join(root, text))
+            if cand:
+                roots.append(cand)
+        if not roots:
+            return False  # 写了但全是空串 → 收紧失败,不放行
+    else:
+        roots = [root]  # 没指定子路径 = 整个项目目录
+    if not any(within(r, target) for r in roots):
         return False
-    # 项目内的 .claude / .git 也不放行(见 WRITE_DENY_DIRS)
-    for deny in WRITE_DENY_DIRS:
-        if within(canon_path(os.path.join(hit, deny)), target):
+    # 路径里**任何一段**叫 .claude / .git 都不放行 —— 不只项目根底下那一个,
+    # 嵌套仓库 / 联接目录里的 .claude 同样要挡住(见 WRITE_DENY_DIRS)
+    for part in target.split('/'):
+        if part in WRITE_DENY_DIRS:
             return False
     return True
 
@@ -470,19 +586,24 @@ def evaluate_tool(tool_name, tool_input, tools=None, root=None, write_paths=None
     """
     if not tool_name:
         return None
+    if tool_name in AGENT_TOOLS:
+        # 只放行"派发"这一步;子 agent 内部跑什么仍由白名单约束
+        return '派发子 agent: %s' % tool_name
+    if tool_name in PATH_TOOLS:
+        # 写文件类工具**只能**走路径判定 —— 白名单的 tools 列表不得整类放行,
+        # 否则白名单里写一条 "Write" 就能绕过 .claude / .git 的拒写名单
+        if not isinstance(tool_input, dict):
+            tool_input = {}
+        path = tool_input.get('file_path') or tool_input.get('notebook_path') or ''
+        if root is None:
+            root = project_root()
+        if not root:
+            return None
+        if write_allowed(path, root, write_paths):
+            return '项目目录内的文件写入: %s' % path
+        return None
     if tools and tool_name in tools:
         return '额外白名单工具: %s' % tool_name
-    if tool_name not in PATH_TOOLS:
-        return None
-    if not isinstance(tool_input, dict):
-        tool_input = {}
-    path = tool_input.get('file_path') or tool_input.get('notebook_path') or ''
-    if root is None:
-        root = project_root()
-    if not root:
-        return None
-    if write_allowed(path, root, write_paths):
-        return '项目目录内的文件写入: %s' % path
     return None
 
 
@@ -493,10 +614,14 @@ def evaluate(command, extra=None):
     """
     if not isinstance(command, str) or not command.strip():
         return None
-    # 先剥掉开头的 `cd <路径> &&` —— 它只是换目录,本身无害。
+    # 命令替换必须在**剥 cd 前缀之前**查:藏在 cd 参数里的 $( ) / 反引号
+    # 会被剥掉,实测 `cd $(whoami) && pytest` 会被整条放行。
+    if has_substitution(command):
+        return None
+    # 再剥掉开头的 `cd <路径> &&` —— 它只是换目录,本身无害。
     # 顺序很重要:先剥 cd 再查复合操作符,否则 cd 里的 && 会把整条命令误杀。
     body = strip_leading_cd(command)
-    if has_unsafe_operators(body):
+    if has_compound_operators(body):
         return None
     tokens = tokenize(body)
     if not tokens:
@@ -506,6 +631,9 @@ def evaluate(command, extra=None):
     if exe.endswith('.exe'):
         exe = exe[:-4]
     if exe in DENIED_EXECUTABLES:
+        return None
+    # find 本身常用(找文件),但 -exec / -delete 能执行命令
+    if exe == 'find' and any(tok in FIND_EXEC_FLAGS for tok in tokens[1:]):
         return None
     hit = match_sdd_script(tokens)
     if hit:
@@ -522,6 +650,13 @@ def evaluate(command, extra=None):
 
 
 def emit_allow(reason):
+    """输出 allow 决定。
+
+    **必须是纯 ASCII**:Windows 上 Python 的 stdout 默认编码是 GBK(cp936),
+    之前用 ensure_ascii=False 时中文理由被写成 GBK 字节,harness 按 UTF-8 读
+    就是乱码 —— 实测日志里出现过「Hook output does not start with {」。
+    ensure_ascii=True 把中文转成 \\uXXXX,任何编码下都是同一串 ASCII 字节。
+    """
     out = {
         'hookSpecificOutput': {
             'hookEventName': 'PreToolUse',
@@ -529,7 +664,7 @@ def emit_allow(reason):
             'permissionDecisionReason': reason,
         }
     }
-    sys.stdout.write(json.dumps(out, ensure_ascii=False))
+    sys.stdout.write(json.dumps(out, ensure_ascii=True))
 
 
 def audit(reason):
@@ -566,6 +701,7 @@ def main():
         reason = evaluate_tool(tool_name, tool_input, tools, None, write_paths)
         if reason:
             emit_allow(reason)
+            audit(reason)
         return 0
 
     command = tool_input.get('command') or ''
