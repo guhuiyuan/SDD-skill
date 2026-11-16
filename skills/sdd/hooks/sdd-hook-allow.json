@@ -12,8 +12,13 @@
     "  - 带 && ; | 等 shell 复合操作符的命令",
     "",
     "tools:额外的工具名(除 Bash 外)。默认空 —— 放行 WebFetch 之类会把内容发到外部服务,",
-    "      需要时再自己加。"
+    "      需要时再自己加。",
+    "",
+    "write_paths:写文件(Write/Edit/MultiEdit/NotebookEdit)时允许的子路径。",
+    "      留空 = 整个项目目录都能写(项目内的 .claude/ 与 .git/ 除外 —— 那两处永远不放行)。",
+    "      想收紧就填相对项目根的子路径,例如 [\"specs\", \"src\"]。"
   ],
   "extra": [],
-  "tools": []
+  "tools": [],
+  "write_paths": []
 }

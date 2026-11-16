@@ -134,14 +134,25 @@ python <技能目录>/scripts/install_hook.py --root . --feature <feature>
 |---|---|
 | `<项目根>/.claude/hooks/sdd_bash_allow.py` | hook 本体 |
 | `<项目根>/.claude/hooks/sdd-hook-allow.json` | 可编辑的白名单 |
-| `<项目根>/.claude/settings.json` 的 `hooks.PreToolUse` | 注册条目 |
+| `<项目根>/.claude/settings.json` 的 `hooks.PreToolUse` | 注册条目(**两组** matcher) |
 
 **只动 `hooks.PreToolUse` 这一个键**,不碰你已有的 `permissions`;重复运行幂等。
 给了 `--feature` 时,还会从 `specs/<feature>/tasks.md` 的「验证命令」字段提取命令
 写进白名单 —— 这样阶段 4 跑测试、子 agent 跑测试都不会再撞权限门。
 
-> **这一步需要你手动跑一次**:`.claude/` 是受保护目录,AI 代跑会被权限门拦下。
-> 装完**新开一个会话**才生效(Claude Code 在会话启动时读 settings.json)。
+注册的两组 matcher:
+
+| matcher | 放行依据 |
+|---|---|
+| `Bash` | 命令白名单(下表) |
+| `Write\|Edit\|MultiEdit\|NotebookEdit` | **路径**:目标在项目目录内 |
+
+> **第一次安装需要你手动跑一次**:那时还没有 hook,`.claude/` 这个受保护目录只能你来写。
+> 装完之后**升级/重装可以交给 AI** —— `python <技能目录>/scripts/install_hook.py`
+> 本身就在 hook 的放行范围内。
+>
+> 装完**通常不用重开会话** —— 实测 harness 会重读 settings.json(2026-11-16 验证:装完当场
+> Edit 就被放行了)。要是没生效,再新开一个会话。
 >
 > 不想往项目里写文件,也可以用 `/hooks` 命令手动注册 —— 命令里填 hook 的**绝对路径**
 > (`python "<技能目录>/hooks/sdd_bash_allow.py"`)。`${CLAUDE_PROJECT_DIR}` 只在
@@ -150,7 +161,14 @@ python <技能目录>/scripts/install_hook.py --root . --feature <feature>
 
 **放行范围**:SDD 自己的脚本、git 的安全子命令(status/diff/log/show/rev-parse/
 branch/add/commit)、常见测试命令(pytest / npm test / cargo test / go test),
-以及白名单文件里的额外命令。
+白名单文件里的额外命令,以及**项目目录内的文件写入**(Write / Edit /
+MultiEdit / NotebookEdit)。
+
+> 写文件这一组是按**路径**判定的:目标在项目目录内就放行。想收紧就在白名单文件里填
+> `"write_paths": ["specs", "src"]`(相对项目根的子路径),留空 = 整个项目目录。
+>
+> **项目内的 `.claude/` 与 `.git/` 永远不放行** —— 前者能给自己授权权限,后者能改
+> git 的 hook 与配置,这两处留给人手动改。
 
 **不放行**:
 
@@ -160,6 +178,7 @@ branch/add/commit)、常见测试命令(pytest / npm test / cargo test / go test
 - 任意 python(`python -c` / `python -m 任意模块`);解释器必须钉死脚本
 - 太松的白名单模式(例如白名单里只写一条 `python`)
 - 带 `&&` `;` `|` 等复合操作符的命令 —— 否则 `python 某脚本 && rm -rf /` 会被整条放行
+- **项目目录外**的文件写入,以及项目内 `.claude/` / `.git/` 里的写入
 
 安装器会**逐条打印**它放进白名单的命令,你可以核对;含复合操作符的验证命令会被
 直接跳过并单独列出来。

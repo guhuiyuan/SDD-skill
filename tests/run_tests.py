@@ -1123,17 +1123,52 @@ def test_hook_and_installer(tmp):
     check('放行 python -m pytest(内置测试命令)', hit('python -m pytest'))
     check('不放行名字相近的其他命令', not hit('pytestx tests/test_x.py'))
 
-    # 直接盯住 load_allowlist 的两个返回值 —— 内置默认项曾经因为元组解包写反
+    # 直接盯住 load_allowlist 的返回值 —— 内置默认项曾经因为元组解包写反
     # (extra, tools = [], list(DEFAULT_EXTRA))被塞进 tools,导致内置白名单全部失效
-    loaded_extra, loaded_tools = hook.load_allowlist()
+    loaded_extra, loaded_tools, loaded_write_paths = hook.load_allowlist()
     check('内置默认白名单在 extra 里', 'pytest' in loaded_extra, repr(loaded_extra[:5]))
     check('内置默认白名单没混进 tools', 'pytest' not in loaded_tools, repr(loaded_tools[:5]))
     check('文件白名单与内置默认项合并', len(loaded_extra) >= len(hook.DEFAULT_EXTRA),
           '%d < %d' % (len(loaded_extra), len(hook.DEFAULT_EXTRA)))
+    check('write_paths 单独返回,不混进 tools', isinstance(loaded_write_paths, list),
+          repr(loaded_write_paths[:5]))
 
     # --- 空输入不炸 ---
     check('空命令不放行', not hit(''))
     check('None 不炸', hook.evaluate(None) is None)
+
+    # --- 写文件工具:只看路径 ---
+    root = os.path.join(tmp, 'write-root')
+    os.makedirs(os.path.join(root, 'src'), exist_ok=True)
+    os.makedirs(os.path.join(root, '.claude'), exist_ok=True)
+    os.makedirs(os.path.join(root, '.git'), exist_ok=True)
+
+    def can_write(tool, path, root_dir=None, write_paths=None):
+        return hook.evaluate_tool(tool, {'file_path': path}, root=root_dir or root,
+                                  write_paths=write_paths) is not None
+
+    check('放行项目目录内的 Write', can_write('Write', os.path.join(root, 'src', 'a.py')))
+    check('放行项目目录内的 Edit', can_write('Edit', os.path.join(root, 'src', 'b.py')))
+    check('放行新建文件(文件还不存在)',
+          can_write('Write', os.path.join(root, 'src', 'new', 'c.py')))
+    check('不放行项目目录外的文件',
+          not can_write('Write', os.path.join(tmp, 'outside.py')))
+    check('不放行路径穿越到项目外',
+          not can_write('Write', os.path.join(root, 'src', '..', '..', 'outside.py')))
+    check('不放行项目内的 .claude/settings.json',
+          not can_write('Write', os.path.join(root, '.claude', 'settings.json')))
+    check('不放行项目内的 .git/config',
+          not can_write('Edit', os.path.join(root, '.git', 'config')))
+    check('缺 file_path 的 Write 不放行', not can_write('Write', ''))
+    check('不认识的工具不放行', hook.evaluate_tool('Read', {'file_path': 'x'}, root=root) is None)
+    check('write_paths 收紧后只放行指定子路径',
+          can_write('Write', os.path.join(root, 'src', 'd.py'), write_paths=['src'])
+          and not can_write('Write', os.path.join(root, 'other.py'), write_paths=['src']))
+    check('write_paths 收紧后仍不放行 .claude',
+          not can_write('Write', os.path.join(root, '.claude', 'settings.json'),
+                        write_paths=['.']))
+    check('推断不出项目根时不放行',
+          hook.evaluate_tool('Write', {'file_path': 'x.py'}, root='') is None)
 
     # --- 安装器 ---
     base = os.path.join(tmp, 'hook-install')
@@ -1171,6 +1206,8 @@ def test_hook_and_installer(tmp):
     check('验证命令被写进白名单',
           'pytest tests/test_login.py' in allowlist.get('extra', []),
           json.dumps(allowlist, ensure_ascii=False)[:300])
+    check('白名单文件里有 write_paths 键', 'write_paths' in allowlist,
+          json.dumps(allowlist, ensure_ascii=False)[:300])
 
     # 幂等:再跑一次不应产生重复条目
     code, out = run('install_hook.py', '--root', base, '--feature', 'demo')
@@ -1180,7 +1217,10 @@ def test_hook_and_installer(tmp):
     ours = [e for e in pre2
             if any('sdd_bash_allow.py' in str(h.get('command', ''))
                    for h in (e.get('hooks') or []))]
-    check('重复安装不产生重复条目', len(ours) == 1, json.dumps(pre2)[:300])
+    check('重复安装不产生重复条目', len(ours) == 2, json.dumps(pre2)[:300])
+    check('注册了 Bash 与写文件两组 matcher',
+          sorted(str(e.get('matcher')) for e in ours) == ['Bash', 'Write|Edit|MultiEdit|NotebookEdit'],
+          json.dumps([e.get('matcher') for e in ours]))
     with io.open(os.path.join(base, '.claude', 'hooks', 'sdd-hook-allow.json'),
                  encoding='utf-8') as fh:
         allowlist2 = json.load(fh)
@@ -1217,8 +1257,8 @@ def test_hook_and_installer(tmp):
              for h in (e.get('hooks') or [])]
     check('同组里用户自己的 hook 没被删', 'my-own-hook.sh' in cmds3, json.dumps(cmds3))
     check('别的 matcher 组没被动', 'other.sh' in cmds3, json.dumps(cmds3))
-    check('我们的 hook 只注册了一条',
-          sum(1 for c in cmds3 if 'sdd_bash_allow.py' in c) == 1, json.dumps(cmds3))
+    check('我们的 hook 注册了两组(Bash + 写文件)',
+          sum(1 for c in cmds3 if 'sdd_bash_allow.py' in c) == 2, json.dumps(cmds3))
 
     # ② 结构不对就拒绝覆盖,别把用户的东西抹掉
     base4 = os.path.join(tmp, 'hook-badshape')

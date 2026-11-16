@@ -19,6 +19,12 @@ PreToolUse hook 跑在**任何权限模式检查之前**,返回 ``permissionDeci
 2. ``<root>/.claude/hooks/sdd-hook-allow.json`` —— 可编辑的白名单
 3. ``<root>/.claude/settings.json`` 的 ``hooks.PreToolUse`` —— 注册 hook
 
+注册**两组** matcher:
+
+- ``Bash`` —— 按命令白名单放行(SDD 脚本 / git 安全子命令 / extra 列表)
+- ``Write|Edit|MultiEdit|NotebookEdit`` —— 按**路径**放行:目标在项目目录内就放行,
+  项目内的 ``.claude/`` 与 ``.git/`` 仍然不放行(改权限、改 git 配置留给人手动做)
+
 只动 ``hooks.PreToolUse``,**不碰 settings.json 里已有的 permissions 等其他键**。
 重复运行是幂等的。**不会删除用户自己注册的 hook** —— 同组里别人的 hook 原样留着。
 
@@ -63,6 +69,10 @@ SOURCE_ALLOWLIST = os.path.join(SKILL_DIR, 'hooks', 'sdd-hook-allow.json')
 HOOK_NAME = 'sdd_bash_allow.py'
 ALLOWLIST_NAME = 'sdd-hook-allow.json'
 HOOK_MARKER = 'sdd_bash_allow.py'
+
+# 写文件类工具的 matcher —— Claude Code 的 matcher 是正则,一次覆盖四个工具。
+# 放行与否只看路径(项目目录内),不看工具名。
+WRITE_MATCHER = 'Write|Edit|MultiEdit|NotebookEdit'
 
 # tasks.md 里的「验证命令」字段:- **验证命令**: `命令`
 # 校验器(validate_specs.py)的 field_value 不要求反引号,这里也要能吃下无反引号的写法
@@ -164,7 +174,12 @@ def extract_verify_commands(tasks_text):
 
 
 def hook_entry(python_exe, root, portable=False):
-    """构造 PreToolUse 条目。
+    """构造 Bash 的 PreToolUse 条目(保持原样,便于兼容既有调用方)。"""
+    return _hook_entry('Bash', python_exe, root, portable)
+
+
+def _hook_entry(matcher, python_exe, root, portable=False):
+    """构造一条 PreToolUse 条目。
 
     默认用**绝对路径** —— 它永远指向真实存在的文件。
     ``${CLAUDE_PROJECT_DIR}`` 只在 ``--portable`` 时用,而且只有当
@@ -182,13 +197,23 @@ def hook_entry(python_exe, root, portable=False):
     else:
         script = os.path.join(hooks_dir, HOOK_NAME).replace('\\', '/')
     return {
-        'matcher': 'Bash',
+        'matcher': matcher,
         'hooks': [{
             'type': 'command',
             # 解释器路径也要加引号 —— Windows 上默认装在 "C:\Program Files\..." 下
             'command': '"%s" "%s"' % (python_exe, script),
         }],
     }
+
+
+def hook_entries(python_exe, root, portable=False):
+    """本工具注册的全部 PreToolUse 条目。
+
+    两组:Bash(按命令白名单放行)+ 写文件工具(按路径放行)。
+    Claude Code 的 matcher 支持正则,所以写文件那组一次覆盖四个工具。
+    """
+    return [_hook_entry('Bash', python_exe, root, portable),
+            _hook_entry(WRITE_MATCHER, python_exe, root, portable)]
 
 
 def is_our_hook(h):
@@ -271,7 +296,8 @@ def main(argv=None):
     if os.path.isfile(allowlist_path):
         _, allow_raw = read_json_checked(allowlist_path)
         problem = shape_problem(allowlist_path, allow_raw,
-                                {'extra': list, 'tools': list})
+                                {'extra': list, 'tools': list,
+                                 'write_paths': list})
         if problem:
             sys.stderr.write('%s\n' % problem)
             return 1
@@ -288,10 +314,12 @@ def main(argv=None):
 
     # ---- 2. 白名单 ----
     # 以技能里带的模板为底(模板里的说明文字跟着走,用户看得懂格式)
-    template, _ = load_json(SOURCE_ALLOWLIST, {'extra': [], 'tools': []})
+    template, _ = load_json(SOURCE_ALLOWLIST, {'extra': [], 'tools': [],
+                                                'write_paths': []})
     allowlist, existed = load_json(allowlist_path, template)
     allowlist.setdefault('extra', [])
     allowlist.setdefault('tools', [])
+    allowlist.setdefault('write_paths', [])
     # 说明文字是生成的(不是用户内容),每次都从模板刷新
     if '_说明' in template:
         allowlist['_说明'] = template['_说明']
@@ -325,7 +353,7 @@ def main(argv=None):
     if not isinstance(pre, list):
         pre = []
     pre = strip_our_entries(pre)
-    pre.append(hook_entry(args.python, root, args.portable))
+    pre.extend(hook_entries(args.python, root, args.portable))
     settings['hooks']['PreToolUse'] = pre
     if not settings_existed:
         actions.append('创建 settings.json: %s' % settings_path)
@@ -373,13 +401,18 @@ def main(argv=None):
     print('  - SDD 技能自己的脚本(python + skills/sdd/scripts/*.py 或 .claude/sdd/*.py)')
     print('  - git 的安全子命令(status/diff/log/show/rev-parse/branch/add/commit)')
     print('  - 白名单里的额外命令(%s)' % ALLOWLIST_NAME)
+    print('  - 写文件工具(Write/Edit/MultiEdit/NotebookEdit):**目标在项目目录内**')
+    print('    (项目内的 .claude/ 与 .git/ 仍然不放行 —— 改权限和改 git 配置留给人手动做)')
+    if allowlist.get('write_paths'):
+        print('    只限这些子路径: %s' % ', '.join(allowlist['write_paths']))
     print('')
     print('不放行 rm / curl / git push / 任意 python;带 && ; | 等复合操作符的命令也不放行。')
+    print('项目目录外的文件写入不放行。')
     print('本 hook 的 allow 不能覆盖 permissions.deny / ask 规则 —— deny/ask 优先。')
     print('你自己注册的其它 hook 不会被删。')
     print('')
-    print('下一步:**新开一个会话**让 hook 生效(Claude Code 在会话启动时读取 settings.json),')
-    print('      然后在 auto 模式下试跑一条 SDD 脚本命令,确认不再被拒。')
+    print('下一步:试跑一条 SDD 脚本命令,确认不再被拒。')
+    print('      (实测 harness 会重读 settings.json,通常不用重开会话;没生效再新开一个。)')
     return 0
 
 

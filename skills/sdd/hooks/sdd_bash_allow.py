@@ -51,6 +51,22 @@ PreToolUse hook 跑在**任何权限模式检查之前**,它返回 ``permissionD
 
 **任何异常都不向外抛** —— hook 崩了会把整个会话搞挂,宁可什么都不做。
 
+## 写文件工具(Write / Edit / MultiEdit / NotebookEdit)
+
+auto 模式把写文件也交给服务端分类器 → 分类器不可达时**连改代码都做不了**
+(SDD 的「照规范实现」阶段直接卡住)。所以本 hook 也管写文件,判定只看**路径**:
+
+- 目标在**项目目录内** → 放行
+- 目标在项目目录外 → 不放行
+- 目标在项目内的 **``.claude/``** 或 **``.git/``** 里 → **不放行**
+  (``.claude/settings.json`` 能给自己授权权限,``.git/config`` 能改 hook —— 这两处
+  必须留给人手动改,不能由 AI 自动放行)
+- 白名单文件里写了 ``"write_paths"`` → 只放行这些子路径(相对项目根或绝对路径)
+
+项目根怎么来:``CLAUDE_PROJECT_DIR`` 环境变量优先;没有就从 hook 自身路径往上找
+**含 ``.claude/`` 的那一层**(装在 ``<项目>/.claude/hooks/`` 下时正好是项目根)。
+两个都拿不到 → **不放行**(失败时收紧,不是放宽)。
+
 ## 白名单(保守)
 
 1. SDD 技能自己的脚本:python 解释器 + 路径含 ``skills/sdd/scripts/`` 或
@@ -131,6 +147,15 @@ PYTHON_PREFIX = ('python',)
 
 # 这些 python 选项后面还跟一个值,跳选项时要把值一起跳过
 PYTHON_VALUE_OPTIONS = frozenset({'-X', '-W', '--check-hash-based-pycs'})
+
+# 带文件路径的工具 —— 放行与否只看路径,不看命令
+PATH_TOOLS = ('Write', 'Edit', 'MultiEdit', 'NotebookEdit')
+
+# 项目目录内也不自动放行的子目录:
+#   .claude/ —— settings.json 能给自己授权权限
+#   .git/    —— config 能改 hook、index 能改工作区状态
+# 这两处必须留给人手动改
+WRITE_DENY_DIRS = ('.claude', '.git')
 
 
 def _is_python_exe(token):
@@ -277,8 +302,14 @@ def allowlist_candidates():
 
 
 def load_allowlist():
-    """读白名单。读不到就当只有内置默认项。"""
-    extra, tools = list(DEFAULT_EXTRA), []
+    """读白名单。读不到就当只有内置默认项。
+
+    返回 (extra, tools, write_paths):
+    - extra       —— 额外放行的命令前缀
+    - tools       —— 额外放行的工具名(整类放行,不看参数)
+    - write_paths —— 写文件时允许的子路径;为空 = 整个项目目录
+    """
+    extra, tools, write_paths = list(DEFAULT_EXTRA), [], []
     for path in allowlist_candidates():
         try:
             with open(path, 'r', encoding='utf-8') as fh:
@@ -295,7 +326,11 @@ def load_allowlist():
             text = str(item)
             if text not in tools:
                 tools.append(text)
-    return extra, tools
+        for item in data.get('write_paths') or []:
+            text = str(item)
+            if text not in write_paths:
+                write_paths.append(text)
+    return extra, tools, write_paths
 
 
 def pattern_is_loose(pattern):
@@ -342,6 +377,115 @@ def match_extra(command, tokens, extra):
     return None
 
 
+# ---------- 写文件工具(Write / Edit / MultiEdit / NotebookEdit) ----------
+
+def canon_path(path):
+    """把路径规范化成可比对的字符串。
+
+    解析软链接/目录联接(realpath),统一大小写与分隔符 —— 这样
+    ``<项目>/a/../../etc`` 与 ``<项目>/link -> C:\\Windows`` 都会露馅。
+    """
+    if not isinstance(path, str) or not path.strip():
+        return ''
+    try:
+        real = os.path.realpath(os.path.abspath(os.path.expanduser(path)))
+    except Exception:
+        return ''
+    text = os.path.normcase(real).replace('\\', '/')
+    if len(text) > 1 and text.endswith('/'):
+        text = text[:-1]
+    return text
+
+
+def within(root, target):
+    """target 是否在 root 之内(root 自身也算)。"""
+    if not root or not target:
+        return False
+    if target == root:
+        return True
+    return target.startswith(root + '/')
+
+
+def project_root():
+    """推断项目根目录;推断不出来返回 ''。
+
+    1. ``CLAUDE_PROJECT_DIR`` 环境变量(harness 给的)
+    2. 从 hook 自身路径往上找 —— 第一个「含 ``.claude`` 子目录」的层
+       (装在 ``<项目>/.claude/hooks/`` 下时正好就是项目根)
+    """
+    env = os.environ.get('CLAUDE_PROJECT_DIR')
+    if env:
+        cand = canon_path(env)
+        if cand:
+            return cand
+    here = os.path.dirname(os.path.abspath(__file__))
+    for _ in range(5):
+        parent = os.path.dirname(here)
+        if not parent or parent == here:
+            break
+        if os.path.isdir(os.path.join(parent, '.claude')):
+            return canon_path(parent)
+        here = parent
+    return ''
+
+
+def write_allowed(file_path, root, write_paths=None):
+    """写入目标是否允许。"""
+    if not file_path or not root:
+        return False
+    root = canon_path(root)
+    target = canon_path(file_path)
+    if not root or not target:
+        return False
+    roots = []
+    for extra in (write_paths or []):
+        text = str(extra).strip()
+        if not text:
+            continue
+        cand = canon_path(text if os.path.isabs(text) else os.path.join(root, text))
+        if cand:
+            roots.append(cand)
+    if not roots:
+        # 没指定子路径 = 整个项目目录
+        roots = [root]
+    hit = None
+    for r in roots:
+        if within(r, target):
+            hit = r
+            break
+    if hit is None:
+        return False
+    # 项目内的 .claude / .git 也不放行(见 WRITE_DENY_DIRS)
+    for deny in WRITE_DENY_DIRS:
+        if within(canon_path(os.path.join(hit, deny)), target):
+            return False
+    return True
+
+
+def evaluate_tool(tool_name, tool_input, tools=None, root=None, write_paths=None):
+    """判定非 Bash 工具。命中返回理由,否则返回 None。
+
+    写文件类工具**只看路径**:在项目目录内就放行,目录外或落在
+    ``.claude/`` / ``.git/`` 里就不放行。
+    """
+    if not tool_name:
+        return None
+    if tools and tool_name in tools:
+        return '额外白名单工具: %s' % tool_name
+    if tool_name not in PATH_TOOLS:
+        return None
+    if not isinstance(tool_input, dict):
+        tool_input = {}
+    path = tool_input.get('file_path') or tool_input.get('notebook_path') or ''
+    if root is None:
+        root = project_root()
+    if not root:
+        return None
+    if write_allowed(path, root, write_paths):
+        return '项目目录内的文件写入: %s' % path
+    return None
+
+
 def evaluate(command, extra=None):
     """判定一条命令是否放行。命中返回理由,否则返回 None。
 
@@ -370,7 +514,7 @@ def evaluate(command, extra=None):
     if hit:
         return 'git 安全子命令: %s' % hit
     if extra is None:
-        extra, _ = load_allowlist()
+        extra, _, _ = load_allowlist()
     hit = match_extra(body, tokens, extra)
     if hit:
         return '额外白名单: %s' % hit
@@ -416,11 +560,12 @@ def main():
     if not isinstance(tool_input, dict):
         tool_input = {}
 
-    extra, tools = load_allowlist()
+    extra, tools, write_paths = load_allowlist()
 
     if tool_name != 'Bash':
-        if tool_name and tool_name in tools:
-            emit_allow('额外白名单工具: %s' % tool_name)
+        reason = evaluate_tool(tool_name, tool_input, tools, None, write_paths)
+        if reason:
+            emit_allow(reason)
         return 0
 
     command = tool_input.get('command') or ''
