@@ -281,14 +281,27 @@ auto 模式的「要不要问用户」在**服务端**判定;代理端点不透�
    任意 python(`python -c` / `python -m 任意模块`)。
 2. **Phase 0 装 hook 时带 `--feature <feature>`**,把当前 feature 的验证命令
    一次性登记进项目白名单(安装器会把复合命令按段拆开逐段收)。
+   项目**常跑**的命令(构建 / lint / 格式化 / 启动)写在 tasks.md 的
+   `## 常用命令` 小节里,装 hook 时同样一次性登记 —— 声明过的,agent 不用
+   每次都问用户;没声明的照旧要问(声明是**授权**,不是猜测):
+
+   ```markdown
+   ## 常用命令
+
+   - `npm run build`
+   - `cargo clippy --manifest-path src/app/src-tauri/Cargo.toml`
+   ```
+
+   `validate_specs.py` 会检查这些命令在 auto 模式下跑不跑得了(跑不了的会报错)。
 3. **命令被拒时不要立刻问用户,先自己走完本地通道**:
    1. `python ${CLAUDE_SKILL_DIR}/scripts/hook_probe.py "<原命令>"`
       → 看 `allowed` 是 true 还是 false(它只判定,不执行命令)。
-   2. `allowed=false`、而这条命令**出现在规范里**(就是某个 Task 的验证命令)
-      → 登记后重试,不用切模式:
+   2. `allowed=false`、而这条命令**出现在规范里**(某个 Task 的验证命令,
+      或「常用命令」小节里)→ 登记后重试,不用切模式:
       `python ${CLAUDE_SKILL_DIR}/scripts/install_hook.py --root . --extra "<原命令>"`
       (安装器本身就在白名单里,而且会逐条打印它登记了什么)。
    3. `allowed=false`、而这条命令**不在规范里** → 问用户(见下面的降级流程)。
+      —— **不要自己登记**:白名单是授权,不是便利。
 4. **联网检索走 MCP,不要用 WebFetch / WebSearch** —— 那两个工具在 auto 模式下
    也要服务端分类器,必然被拒;具体的 MCP 工具(如 `mcp__MiniMax__web_search`)
    走的是白名单里的精确规则,不受「宽泛规则被丢弃」那条策略影响。

@@ -214,8 +214,10 @@ MultiEdit / NotebookEdit),以及**派发子 agent**(Agent / Task)。
 | 规则 | 谁保证 |
 |---|---|
 | 每个 Task 的「验证命令」必须能进白名单(不碰重定向/后台/命令替换/shell/任意 python) | `validate_specs.py` 在规范阶段就报错 |
+| 项目常跑的命令(构建 / lint / 格式化)写在 tasks.md 的 `## 常用命令` 小节里,装 hook 时一次性登记 | `install_hook.py --feature`;`validate_specs.py` 也会查它们跑不跑得了 |
 | Phase 0 装 hook 时带 `--feature <feature>`,把验证命令一次性登记进项目白名单 | `install_hook.py` |
 | 命令被拒时先 `hook_probe.py "<命令>"` 看结论;命令在规范里就 `--extra` 登记后重试 | 探针 + 安装器(两者本身都在白名单里) |
+| **规范里没有的命令要问用户** —— 白名单是授权,不是便利 | SKILL.md 的契约 + agent 纪律 |
 | 联网检索走 MCP 的 web_search,不用 WebFetch / WebSearch | 后者要服务端分类器,auto 模式下必拒 |
 
 **不放行**:

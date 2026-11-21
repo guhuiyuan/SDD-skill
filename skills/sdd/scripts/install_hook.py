@@ -93,6 +93,13 @@ VERIFY_LINE_RE = re.compile(
     r'^\s*-\s*\*\*验证命令\*\*\s*[:：]\s*(.+?)\s*$')
 CODE_SPAN_RE = re.compile(r'`([^`]+)`')
 
+# tasks.md 里可选的「常用命令」小节 —— 项目自己声明的、每次都要跑的命令
+# (构建 / lint / 格式化 / 启动 …)。装 hook 时一次性登记进白名单,
+# 这样 agent 临时要用这些命令时不用每次都问用户。
+# 声明之外的行为命令仍然要问 —— 声明是**授权**,不是猜测。
+COMMON_HEADING = '常用命令'
+SECTION_RE = re.compile(r'^\s{0,3}(#{1,6})\s*(.+?)\s*$')
+
 # 白名单只放行"一条干净的命令" —— 带复合操作符的要按段拆开逐段收
 UNSAFE_CMD_RE = re.compile(r'&&|\|\||[;|&><`]|\$\(')
 
@@ -235,6 +242,40 @@ def iter_verify_fields(tasks_text):
                 break
             parts.append(nxt.strip())
         yield ' '.join(parts)
+
+
+def iter_section_bullets(text, heading):
+    """产出某个标题小节下面的条目文本(到下一个标题为止)。"""
+    inside = False
+    for line in text.splitlines():
+        m = SECTION_RE.match(line)
+        if m:
+            inside = (m.group(2).strip() == heading)
+            continue
+        if not inside:
+            continue
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith(('-', '*', '+')):
+            yield stripped.lstrip('-*+ ').strip()
+
+
+def extract_common_commands(tasks_text):
+    """从「常用命令」小节提取命令(可选小节,没有就返回空)。"""
+    hook = hook_module()
+    out = []
+    for item in iter_section_bullets(tasks_text, COMMON_HEADING):
+        spans = [s.strip() for s in CODE_SPAN_RE.findall(item) if s.strip()]
+        for one in (spans if spans else [item]):
+            one = one.strip()
+            if not one or one.startswith('<'):
+                continue
+            if hook is not None and not hook.looks_like_command(one):
+                continue          # 散文片段不是命令
+            if one not in out:
+                out.append(one)
+    return out
 
 
 def extract_verify_commands(tasks_text):
@@ -382,6 +423,7 @@ def main(argv=None):
 
     actions = []
     added_cmds = []
+    common_cmds = []
     skipped_cmds = []
 
     # ---- 结构检查:不对就拒绝覆盖,别把用户的东西抹掉 ----
@@ -453,6 +495,15 @@ def main(argv=None):
                 if cmd not in allowlist['extra']:
                     allowlist['extra'].append(cmd)
                     added_cmds.append(cmd)
+            # 「常用命令」小节 —— 项目自己声明的常跑命令,一次性登记
+            for cmd in extract_common_commands(read(tasks_path)):
+                pieces, safe = split_command(cmd)
+                if not safe:
+                    continue
+                for piece in pieces:
+                    if piece not in allowlist['extra']:
+                        allowlist['extra'].append(piece)
+                        common_cmds.append(piece)
             skipped_cmds.extend(s for s in skipped if s not in skipped_cmds)
             if not cmds:
                 sys.stderr.write('从 %s 里没提取到任何验证命令'
@@ -504,6 +555,11 @@ def main(argv=None):
             print('  + %s' % cmd)
     else:
         print('放行的额外命令:无(只有内置的测试命令)')
+    if common_cmds:
+        print('')
+        print('放行的常用命令(来自 tasks.md 的「%s」小节):' % COMMON_HEADING)
+        for cmd in common_cmds:
+            print('  + %s' % cmd)
     if skipped_cmds:
         print('')
         print('因含不安全成分而**未**放行的命令:')

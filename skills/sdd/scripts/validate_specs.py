@@ -47,6 +47,11 @@ HTML_TAG_RE = re.compile(
     r'^</?(br|hr|img|a|p|div|span|code|pre|b|i|em|strong|td|th|tr|table|ul|ol|li|'
     r'input|link|meta|!--|font|center|small|sup|sub)[^<>]*>$', re.I)
 
+# tasks.md 里可选的「常用命令」小节 —— 项目自己声明的常跑命令。
+# 装 hook 时(install_hook.py --feature)会一次性登记进白名单:
+# 声明过的命令 agent 不用每次都问用户,没声明的照旧要问。
+COMMON_HEADING = '常用命令'
+
 # 「可二值判定」的判定采用**黑名单**制:默认认为可观测,只在明确出现模糊措辞时才判为不可观测。
 # 白名单制会误伤大量正常写法(如「校验通过并签发会话令牌」),代价是逼用户去改自己的验收标准——
 # 误判一个合格 AC 的代价远大于放过一个模糊 AC。
@@ -747,6 +752,23 @@ def validate_design(path, report, proposal):
 
 # ---------------------------------------------------------------- tasks 校验
 
+def common_commands_section(text):
+    """产出 tasks.md 里「常用命令」小节的条目文本(可选小节,没有就空)。"""
+    inside = False
+    for line in text.splitlines():
+        m = re.match(r'^\s{0,3}(#{1,6})\s*(.+?)\s*$', line)
+        if m:
+            inside = (m.group(2).strip() == COMMON_HEADING)
+            continue
+        if not inside:
+            continue
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith(('-', '*', '+')):
+            yield stripped.lstrip('-*+ ').strip()
+
+
 def validate_tasks(path, report, proposal):
     where = os.path.basename(path)
     if not os.path.isfile(path):
@@ -881,6 +903,20 @@ def validate_tasks(path, report, proposal):
 
     for line_no, token in find_placeholders(text):
         report.error(where, '第 %d 行仍有未填写的占位符 %s' % (line_no, token))
+
+    # 「常用命令」小节(可选):项目自己声明的常跑命令,装 hook 时会登记进白名单。
+    # 这里查它们在 auto 模式下能不能跑 —— 登记不了就等于白写。
+    hook = hook_module()
+    for item in common_commands_section(text):
+        cmds = [s.strip() for s in re.findall(r'`([^`]+)`', item) if s.strip()]
+        for one in (cmds if cmds else [item.strip()]):
+            if not one or one.startswith('<'):
+                continue
+            if hook is not None and not hook.looks_like_command(one):
+                continue          # 散文片段
+            for reason in auto_mode_blockers(one):
+                report.error(where, '「%s」小节里的命令「%s」在 auto 模式下跑不了:%s'
+                             % (COMMON_HEADING, one, reason))
 
     return {'tasks': numbers, 'done': done, 'trace': trace_map}
 

@@ -799,6 +799,16 @@ def test_validate_specs(tmp):
     code, out = run('validate_specs.py', '--feature', 'demo', '--root', base)
     check('多条验证命令(markdown 代码段)不误报命令替换', code == 0, out[-300:])
 
+    # 「常用命令」小节里的命令也要能在 auto 模式下跑
+    base = os.path.join(tmp, 'v_auto4')
+    d = make_project(base)
+    with io.open(os.path.join(d, 'tasks.md'), 'a', encoding='utf-8',
+                 newline='\n') as fh:
+        fh.write('\n## 常用命令\n\n- `npx vitest run tests/e2e/x.test.ts`\n')
+    code, out = run('validate_specs.py', '--feature', 'demo', '--root', base)
+    check('常用命令在 auto 模式下跑不了时报错',
+          code != 0 and 'auto 模式' in out, out[-300:])
+
     base = os.path.join(tmp, 'v9')
     d = make_project(base)
     mutate(os.path.join(d, 'tasks.md'),
@@ -1536,7 +1546,10 @@ def test_hook_and_installer(tmp):
                  '- **验证命令**: `cd app && npm test`\n'
                  '- **验证命令**: `npm run build && npm test`\n'
                  '- **验证命令**: `cd app && npm test` 与 `cd app && npm run build`\n'
-                 '- **验证命令**: `pytest tests/test_x.py`，外加一次核对（`GET /api/v1/x`）\n')
+                 '- **验证命令**: `pytest tests/test_x.py`，外加一次核对（`GET /api/v1/x`）\n'
+                 '\n## 常用命令\n\n'
+                 '- `npm run build`\n'
+                 '- `cargo clippy --manifest-path src/app/src-tauri/Cargo.toml`\n')
     code, out = run('install_hook.py', '--root', base5, '--feature', 'demo')
     with io.open(os.path.join(base5, '.claude', 'hooks', 'sdd-hook-allow.json'),
                  encoding='utf-8') as fh:
@@ -1566,6 +1579,10 @@ def test_hook_and_installer(tmp):
     check('散文里的 HTTP 接口不进白名单',
           not any(c.startswith('GET /api') for c in al5.get('extra', [])),
           json.dumps(al5, ensure_ascii=False))
+    # 「常用命令」小节:项目自己声明的常跑命令,一次性登记
+    check('常用命令小节里的命令进白名单',
+          'cargo clippy --manifest-path src/app/src-tauri/Cargo.toml'
+          in al5.get('extra', []), json.dumps(al5, ensure_ascii=False))
     check('复合命令不会整条进白名单',
           not any('&&' in c for c in al5.get('extra', [])),
           json.dumps(al5, ensure_ascii=False))
