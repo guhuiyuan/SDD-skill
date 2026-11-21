@@ -183,6 +183,7 @@ python <技能目录>/scripts/install_hook.py --root . --feature <feature>
 
 **放行范围**:SDD 自己的脚本、git 的安全子命令(status/diff/log/show/rev-parse/
 branch/add/commit)、常见测试命令(pytest / npm test / cargo test / go test),
+**只读命令**(ls / cat / head / grep / find / diff …,路径必须在项目目录内),
 白名单文件里的额外命令、**项目目录内的文件写入**(Write / Edit /
 MultiEdit / NotebookEdit),以及**派发子 agent**(Agent / Task)。
 
@@ -196,6 +197,27 @@ MultiEdit / NotebookEdit),以及**派发子 agent**(Agent / Task)。
 > 补充:auto 模式对写文件本来有内建短路(「若在 acceptEdits 模式下会被放行」),
 > hook 的路径判定是**兜底**;分类器不可达时它才真正起作用。
 
+**复合命令按段判定** —— 一条命令里有 `&&` `||` `;` `|` 或换行时,按 shell 习惯在
+引号外拆成若干段,**每段都要单独通过判定,全过才整条放行**:
+
+| 命令 | 结果 |
+|---|---|
+| `cd X && pytest` | 放行(`cd` 段跳过,`pytest` 段命中白名单) |
+| `sleep 5 && cd X && pytest` | 放行 |
+| `cat f \| head -20` | 放行(只读段,路径在项目内) |
+| `git status && git diff` | 放行 |
+| `python x.py && rm -rf /` | **不放行**(`rm` 那一段过不了,整条就不放行) |
+| `cat ~/.ssh/id_rsa` | **不放行**(只读命令的路径必须在项目目录内) |
+
+**auto 模式契约**(技能工作流靠它做到「不切模式也能把活干完」):
+
+| 规则 | 谁保证 |
+|---|---|
+| 每个 Task 的「验证命令」必须能进白名单(不碰重定向/后台/命令替换/shell/任意 python) | `validate_specs.py` 在规范阶段就报错 |
+| Phase 0 装 hook 时带 `--feature <feature>`,把验证命令一次性登记进项目白名单 | `install_hook.py` |
+| 命令被拒时先 `hook_probe.py "<命令>"` 看结论;命令在规范里就 `--extra` 登记后重试 | 探针 + 安装器(两者本身都在白名单里) |
+| 联网检索走 MCP 的 web_search,不用 WebFetch / WebSearch | 后者要服务端分类器,auto 模式下必拒 |
+
 **不放行**:
 
 - rm / curl / wget / sudo / chmod 等危险可执行文件 —— **即使你写进白名单也不放行**
@@ -207,12 +229,18 @@ MultiEdit / NotebookEdit),以及**派发子 agent**(Agent / Task)。
   (`-c` 能定义 alias 把"安全子命令"换成任意 shell;`--exec-path` 能换掉子命令查找路径)
 - 任意 python(`python -c` / `python -m 任意模块`);解释器必须钉死脚本
 - 太松的白名单模式(例如白名单里只写一条 `python` 或一条 `sh`)
-- 带 `&&` `;` `|` 等复合操作符的命令 —— 否则 `python 某脚本 && rm -rf /` 会被整条放行
+- **文件重定向**(`>` `>>` `<`)—— 能写文件
+- **后台运行**(单个 `&`)—— 脱离监督
 - **任何位置**的命令替换(`$( )` 与反引号),包括藏在 `cd <路径> &&` 的参数里
 - **项目目录外**的文件写入,以及路径里带 `.claude` / `.git` 的写入
+- `skills/sdd/scripts/` 下**名字不在固定名单里**的脚本 —— 那个目录 AI 自己就能写,
+  按目录信任等于给它一个「写一个 .py 再执行它」的口子;只认 `init_specs.py` /
+  `validate_specs.py` / `update_claude_md.py` / `verify_acceptance.py` /
+  `export_openspec.py` / `install_hook.py` / `hook_probe.py` 这几个
 
-安装器会**逐条打印**它放进白名单的命令,你可以核对;含复合操作符的验证命令会被
-直接跳过并单独列出来。
+安装器会**逐条打印**它放进白名单的命令,你可以核对;复合命令会**按段拆开**逐段收
+(hook 判定复合命令也是逐段判的),只要有一段不安全 —— 危险可执行文件、重定向、
+后台运行、命令替换 —— 整条都不收,并单独列出来。
 
 **它不能覆盖 `permissions.deny` / `ask` 规则** —— Claude Code 里 deny/ask 优先于
 hook 的返回值,所以不会削弱你已有的安全规则。删掉 hook 文件与 settings.json 里的
@@ -310,6 +338,9 @@ python skills/sdd/scripts/export_openspec.py --feature user-auth
 
 # 装 PreToolUse hook(auto 模式下让 bash 照常执行;需手动跑一次)
 python skills/sdd/scripts/install_hook.py --root . --feature user-auth
+
+# 问 hook「这条命令会不会被放行」(命令被拒却看不出原因时用它定位)
+python skills/sdd/scripts/hook_probe.py "git status && rm -rf /"
 ```
 
 `validate_specs.py` 的检查项:
@@ -351,8 +382,8 @@ python tests/run_tests.py
 回归覆盖脚本的行为:结构校验、AC 可二值化、性能量化、DAG 无环、追溯闭合、
 delta 影响面、阶段判定、幂等性、多 feature 共存、OpenSpec 导出、注释里的示例编号
 不被当成真实数据、§0 元信息、假设与开放问题分离,as-is(现状逆向)模式的整套规则,
-以及 PreToolUse hook 的放行判定(复合操作符、路径穿越、git 子命令白名单)与
-安装器的幂等性。
+以及 PreToolUse hook 的放行判定(复合命令按段判定、只读命令的路径边界、路径穿越、
+git 子命令白名单)与安装器的幂等性。
 不依赖 pytest。
 
 ### 与 `/git` skill 衔接

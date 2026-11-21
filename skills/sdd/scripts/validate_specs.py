@@ -288,6 +288,103 @@ def cell_text(row):
     return ' '.join(c for c in row if c).strip()
 
 
+# ---------------------------------------------------------------- auto 模式可跑性
+
+_HOOK_MODULE = None
+
+
+def hook_module():
+    """导入 PreToolUse hook 模块(判定规则以它为准)。导入不了返回 None。"""
+    global _HOOK_MODULE
+    if _HOOK_MODULE is None:
+        hooks_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'hooks')
+        if hooks_dir not in sys.path:
+            sys.path.insert(0, hooks_dir)
+        try:
+            import sdd_bash_allow
+            _HOOK_MODULE = sdd_bash_allow
+        except Exception:
+            _HOOK_MODULE = False
+    return _HOOK_MODULE or None
+
+
+def verification_field_text(tree):
+    """「验证命令」字段的完整文本(本行 + 缩进续行)。
+
+    字段常跨行:
+        - **验证命令**: `cmd1` 与
+          `cmd2`
+    续行在 bullet 树里是这个字段节点的子项 —— 一起取,否则第二条命令会被漏掉。
+    """
+    for node in flatten_tree(tree):
+        m = re.match(r'^\*{0,2}([^*:：]+)\*{0,2}\s*[:：]\s*(.*)$', node['text'])
+        if not m or m.group(1).strip() != '验证命令':
+            continue
+        value = m.group(2).strip()
+        kids = ' '.join(k['text'] for k in node['children']).strip()
+        return (value + ' ' + kids).strip()
+    return None
+
+
+def verification_commands(value):
+    """把「验证命令」字段拆成一条条命令。
+
+    字段里常常是 `` `cmd1` 与 `cmd2` ``(多条,markdown 代码段),也可能没加
+    反引号(单条)。**代码段的反引号不是 shell 的命令替换** —— 按整段文本查
+    命令替换会误报。
+
+    代码段里也可能混着**说明**(「外加一次核对:`GET /api/x`」),那种不像命令
+    的片段会被剔掉(判据见 hook 的 looks_like_command)。
+
+    返回命令列表。
+    """
+    if not value:
+        return []
+    hook = hook_module()
+    spans = [s.strip() for s in re.findall(r'`([^`]+)`', value) if s.strip()]
+    if spans:
+        if hook is not None:
+            cmds = [s for s in spans if hook.looks_like_command(s)]
+        else:
+            cmds = spans
+        return cmds or []
+    return [value.strip()]
+
+
+def auto_mode_blockers(cmd):
+    """这条验证命令在 auto 模式下能不能跑。返回阻塞原因列表(空 = 能跑)。
+
+    背景:auto 模式的「要不要问用户」在**服务端**判定;代理端点不透传那个调用
+    → 不可达 → 本地只剩 PreToolUse hook 能放行。hook 能放行的形态是有限的:
+
+    - 不能含文件重定向(``> >> <``)、后台运行(``&``)、命令替换(``$( )`` / 反引号)
+    - 每一段的可执行文件不能是危险名单(rm / curl / sh / node / npx …)
+    - 解释器必须钉死脚本或模块(不能 ``python -c`` / ``python -m 任意模块``)
+    - 白名单模式不能太松(不能只写一条 ``python``)
+
+    **在规范阶段就查出来**,比跑到 Phase 4 撞上「Auto mode is unavailable」强。
+    """
+    reasons = []
+    hook = hook_module()
+    if hook is None or not cmd:
+        return reasons          # 拿不到 hook 就不报(别让环境问题卡住规范)
+    if hook.has_substitution(cmd):
+        reasons.append('含命令替换($( ) 或反引号),hook 不放行')
+    segments, raws, writes, unterminated = hook.split_segments(cmd)
+    if writes:
+        reasons.append('含文件重定向(> >> <)或后台运行(&),hook 不放行')
+    if unterminated:
+        reasons.append('引号没闭合')
+    for tokens, raw in zip(segments, raws):
+        if not tokens or tokens[0].lower() == 'cd':
+            continue
+        if hook.pattern_is_loose(raw):
+            reasons.append('「%s」放不进白名单:危险可执行文件 / shell 与解释器 / '
+                           '模式太松(如只写一条 python)' % raw)
+    return reasons
+
+
 def field_value(tree, name):
     """取 '- **名称**: 值' 字段的值。值为空时回落到其子项文本(处理 ADR 的「选项」)。"""
     for node in flatten_tree(tree):
@@ -717,13 +814,19 @@ def validate_tasks(path, report, proposal):
                 report.error(where, '%s 已标记 [x] 完成,但没有记录「验证结果」'
                                   '(跑通的命令 + 关键输出)' % tid)
 
-        cmd = field_value(tree, '验证命令')
+        cmd = verification_field_text(tree)
         if cmd:
-            cmd = cmd.strip().strip('`')
-            if not cmd or len(cmd) < 3:
-                report.error(where, '%s 的验证命令无效' % tid)
-            elif not re.search(r'\s', cmd):
-                report.warn(where, '%s 的验证命令「%s」看起来不像可执行命令' % (tid, cmd))
+            for one in verification_commands(cmd):
+                if not one or len(one) < 3:
+                    report.error(where, '%s 的验证命令无效' % tid)
+                elif not re.search(r'\s', one):
+                    report.warn(where, '%s 的验证命令「%s」看起来不像可执行命令' % (tid, one))
+                # auto 模式跑不了的验证命令,在规范阶段就报出来 —— 免得跑到 Phase 4
+                # 才撞上「Auto mode is unavailable」
+                for reason in auto_mode_blockers(one):
+                    report.error(where, '%s 的验证命令在 auto 模式下跑不了:%s'
+                                 '(改成能进白名单的形态,见 SKILL.md「auto 模式契约」)'
+                                 % (tid, reason))
 
         deps = set()
         dep_field = field_value(tree, '依赖') or ''

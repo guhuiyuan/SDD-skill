@@ -36,8 +36,9 @@ PreToolUse hook 跑在**任何权限模式检查之前**,返回 ``permissionDeci
 给了 ``--feature`` 时,会从 ``specs/<feature>/tasks.md`` 的「验证命令」字段里
 提取命令写进白名单 —— 这样阶段 4 跑测试、子 agent 跑测试都不会再撞分类器。
 
-提取出来的命令会**逐条打印**给你看;含 shell 复合操作符(``&&`` ``;`` ``|`` 等)
-的命令**一律不收** —— 白名单只放行"一条干净的命令",不能借它夹带别的动作。
+提取出来的命令会**逐条打印**给你看。含 shell 复合操作符(``&&`` ``;`` ``|``)的命令
+会**按段拆开**逐段收 —— hook 判定复合命令时也是逐段判的,每段都要单独命中白名单。
+只要有一段不安全(危险可执行文件、重定向、后台运行、命令替换),整条都不收。
 
 ## 用法
 
@@ -82,15 +83,39 @@ WRITE_MATCHER = 'Write|Edit|MultiEdit|NotebookEdit'
 AGENT_MATCHER = 'Agent|Task'
 
 # tasks.md 里的「验证命令」字段:- **验证命令**: `命令`
-# 校验器(validate_specs.py)的 field_value 不要求反引号,这里也要能吃下无反引号的写法
-VERIFY_RE = re.compile(
-    r'^\s*-\s*\*\*验证命令\*\*\s*[:：]\s*(?:`([^`]+)`|([^`\n]+?))\s*$', re.M)
+# 校验器(validate_specs.py)的 field_value 不要求反引号,这里也要能吃下无反引号的写法。
+# 字段里常常有多条命令(`` `cmd1` 与 `cmd2` ``)—— 反引号是 markdown 代码段,
+# **不是** shell 的命令替换,所以要按代码段拆开,不能拿整段文本去查 `$(`。
+# 字段还常跨行(续行是缩进的):
+#     - **验证命令**: `cmd1` 与
+#       `cmd2`
+VERIFY_LINE_RE = re.compile(
+    r'^\s*-\s*\*\*验证命令\*\*\s*[:：]\s*(.+?)\s*$')
+CODE_SPAN_RE = re.compile(r'`([^`]+)`')
 
-# 白名单只放行"一条干净的命令" —— 带复合操作符的会被 hook 拒绝,提取时也直接跳过
+# 白名单只放行"一条干净的命令" —— 带复合操作符的要按段拆开逐段收
 UNSAFE_CMD_RE = re.compile(r'&&|\|\||[;|&><`]|\$\(')
 
 # 剥掉开头的 `cd <路径> && `
 CD_PREFIX_RE = re.compile(r'^\s*cd\s+(?:"[^"]*"|\'[^\']*\'|[^\s&|;]+)\s*&&\s*')
+
+# hook 模块(懒加载)—— 复用它的拆段与安全判定,免得两处实现对不上
+_HOOK_MODULE = None
+
+
+def hook_module():
+    """导入 hook 模块;导入不了就返回 None(这时只收单条命令)。"""
+    global _HOOK_MODULE
+    if _HOOK_MODULE is None:
+        hooks_dir = os.path.join(SKILL_DIR, 'hooks')
+        if hooks_dir not in sys.path:
+            sys.path.insert(0, hooks_dir)
+        try:
+            import sdd_bash_allow
+            _HOOK_MODULE = sdd_bash_allow
+        except Exception:
+            _HOOK_MODULE = False
+    return _HOOK_MODULE or None
 
 
 def read(path):
@@ -157,26 +182,99 @@ def shape_problem(path, data, spec):
     return None
 
 
+def split_command(cmd):
+    """把一条命令拆成「可以进白名单的段」。
+
+    返回 (段列表, 是否安全)。
+    - 复合命令按 hook 的规则拆段(引号外的 && ; | 与换行)
+    - ``cd`` 段直接丢掉(只是换目录,hook 也跳过它)
+    - 带重定向 / 后台运行 / 命令替换 → 整条不安全
+    - 段里是危险可执行文件(rm / curl / sh / npx …)或太松的模式 → 不安全
+    """
+    hook = hook_module()
+    if hook is None:
+        return [], False
+    if hook.has_substitution(cmd):
+        return [], False
+    segments, raws, writes, unterminated = hook.split_segments(cmd)
+    if writes or unterminated:
+        return [], False
+    out = []
+    for tokens, raw in zip(segments, raws):
+        if not tokens:
+            continue
+        if tokens[0].lower() == 'cd':
+            continue
+        exe = os.path.basename(tokens[0]).lower()
+        if exe.endswith('.exe'):
+            exe = exe[:-4]
+        if exe in hook.DENIED_EXECUTABLES:
+            return [], False
+        if hook.pattern_is_loose(raw):
+            return [], False
+        out.append(raw)
+    return out, True
+
+
+def iter_verify_fields(tasks_text):
+    """产出每个「验证命令」字段的完整文本(含缩进续行)。
+
+    字段常跨行:
+        - **验证命令**: `cmd1` 与
+          `cmd2`
+    续行必须一起取,否则第二条命令会被漏掉。
+    """
+    lines = tasks_text.splitlines()
+    for i, line in enumerate(lines):
+        m = VERIFY_LINE_RE.match(line)
+        if not m:
+            continue
+        parts = [m.group(1).strip()]
+        for nxt in lines[i + 1:]:
+            if not nxt.strip() or not nxt.startswith((' ', '\t')):
+                break
+            parts.append(nxt.strip())
+        yield ' '.join(parts)
+
+
 def extract_verify_commands(tasks_text):
     """从 tasks.md 提取「验证命令」。
 
-    返回 (可用的命令列表, 因含复合操作符被跳过的命令列表)。
-    占位符、空命令不取。
+    返回 (可用的命令列表, 因不安全被跳过的命令列表)。
+    占位符、空命令不取。一个字段里可能有多条命令(`` `cmd1` 与 `cmd2` ``),
+    逐条处理。复合命令按段拆开 —— 只要有一段不安全,整条都不收
+    (hook 判定复合命令也是逐段判的,放行了半条链没有意义)。
     """
     out, skipped = [], []
-    for m in VERIFY_RE.finditer(tasks_text):
-        raw = (m.group(1) or m.group(2) or '').strip()
+    hook = hook_module()
+    for raw in iter_verify_fields(tasks_text):
         if not raw or raw.startswith('<'):
             continue
-        cmd = CD_PREFIX_RE.sub('', raw)
-        if not cmd:
-            continue
-        if UNSAFE_CMD_RE.search(cmd):
-            if cmd not in skipped:
-                skipped.append(cmd)
-            continue
-        if cmd not in out:
-            out.append(cmd)
+        spans = [s.strip() for s in CODE_SPAN_RE.findall(raw) if s.strip()]
+        if spans:
+            # 代码段里也可能混着说明(「外加一次核对:`GET /api/x`」)——
+            # 不像命令的片段剔掉,别把路径和接口登记成命令
+            cmds = [s for s in spans
+                    if hook is None or hook.looks_like_command(s)]
+        else:
+            cmds = [raw]
+        for one in cmds:
+            if not one or one.startswith('<'):
+                continue
+            cmd = CD_PREFIX_RE.sub('', one)
+            if not cmd:
+                continue
+            if UNSAFE_CMD_RE.search(cmd):
+                pieces, safe = split_command(cmd)
+                if safe and pieces:
+                    for piece in pieces:
+                        if piece not in out:
+                            out.append(piece)
+                elif cmd not in skipped:
+                    skipped.append(cmd)
+                continue
+            if cmd not in out:
+                out.append(cmd)
     return out, skipped
 
 
@@ -334,9 +432,17 @@ def main(argv=None):
 
     for cmd in args.extra:
         cmd = CD_PREFIX_RE.sub('', str(cmd).strip())
-        if cmd and cmd not in allowlist['extra']:
-            allowlist['extra'].append(cmd)
-            added_cmds.append(cmd)
+        if not cmd:
+            continue
+        pieces, safe = split_command(cmd)
+        if not safe:
+            if cmd not in skipped_cmds:
+                skipped_cmds.append(cmd)
+            continue
+        for piece in pieces:
+            if piece not in allowlist['extra']:
+                allowlist['extra'].append(piece)
+                added_cmds.append(piece)
     if args.feature:
         tasks_path = os.path.join(root, 'specs', args.feature, 'tasks.md')
         if not os.path.isfile(tasks_path):
@@ -400,15 +506,17 @@ def main(argv=None):
         print('放行的额外命令:无(只有内置的测试命令)')
     if skipped_cmds:
         print('')
-        print('因含 shell 复合操作符而**未**放行的命令:')
+        print('因含不安全成分而**未**放行的命令:')
         for cmd in skipped_cmds:
             print('  ! %s' % cmd)
-        print('  (白名单只放行"一条干净的命令",复合命令请自己改成单条再跑)')
+        print('  (复合命令会按段拆开逐段收;但只要有一段危险/带重定向/带命令替换,')
+        print('   整条都不收 —— 请改成单条再跑)')
     print('')
     print('放行范围:')
     print('  - SDD 技能自己的脚本(python + skills/sdd/scripts/*.py 或 .claude/sdd/*.py)')
     print('  - git 的安全子命令(status/diff/log/show/rev-parse/branch/add/commit)')
     print('  - 白名单里的额外命令(%s)' % ALLOWLIST_NAME)
+    print('  - 只读命令(ls/cat/head/grep/find/diff/…):路径必须在项目目录内')
     print('  - 写文件工具(Write/Edit/MultiEdit/NotebookEdit):**目标在项目目录内**')
     print('    (项目内的 .claude/ 与 .git/ 仍然不放行 —— 改权限和改 git 配置留给人手动做)')
     print('  - 派发子 agent(Agent/Task):只放行"派发"这一步,')
@@ -418,7 +526,9 @@ def main(argv=None):
     print('')
     print('不放行 rm / curl / git push / 任意 python;')
     print('也不放行 shell 与脚本解释器(sh / bash / cmd / powershell / node / npx …)、')
-    print('包装器(env / xargs)、find -exec、带 && ; | 的复合命令、以及任何位置的命令替换。')
+    print('包装器(env / xargs)、find -exec、文件重定向(> >> <)、后台运行(&)、')
+    print('以及任何位置的命令替换。')
+    print('复合命令(&& ; |)按段判定:每段都要单独命中白名单,全过才整条放行。')
     print('项目目录外的文件写入不放行;路径里带 .claude 或 .git 的写入也不放行。')
     print('本 hook 的 allow 不能覆盖 permissions.deny / ask 规则 —— deny/ask 优先。')
     print('你自己注册的其它 hook 不会被删。')

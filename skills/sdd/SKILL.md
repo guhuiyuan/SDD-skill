@@ -244,6 +244,7 @@ hook 放行:
   要求路径**整段**命中且落在可信根下)
 - git 的安全子命令(status/diff/log/show/rev-parse/branch/add/commit)
 - 常见测试命令(pytest / npm test / cargo test / go test)与白名单文件里的额外命令
+- **只读命令**(ls / cat / head / grep / find / diff …;路径必须在项目目录内)
 - **写文件**(Write / Edit / MultiEdit / NotebookEdit):目标在项目目录内;
   路径里任何一段叫 `.claude` 或 `.git` 都不放行(留给人手动改)
 
@@ -251,20 +252,57 @@ hook 放行:
 **shell 与脚本解释器**(sh / bash / cmd / powershell / perl / node / npx /
 osascript …)与包装器(env / xargs)—— 它们能执行任意命令、`find -exec`、
 git push/reset/clean 与任何改变 git 行为的前置选项(`-c` 能定义 alias)、
-任意 python(`-c` / `-m 任意模块`)、太松的白名单模式、带 `&&` `;` `|` 等
-复合操作符的命令、以及**任何位置**的命令替换(`$( )` 与反引号,包括藏在
-`cd <路径> &&` 的参数里)。
+任意 python(`-c` / `-m 任意模块`)、太松的白名单模式、
+**文件重定向**(`> >> <`)、**后台运行**(`&`)、以及**任何位置**的命令替换
+(`$( )` 与反引号,包括藏在 `cd <路径> &&` 的参数里)。
+
+**复合命令按段判定**:`&&` `||` `;` `|` 与换行会按 shell 习惯在引号外拆段,
+**每段单独判定,全过才整条放行** —— `cd X && pytest`、`sleep 5 && cd X && pytest`、
+`cat f | head -20`、`git status && git diff` 都放行;而 `python x.py && rm -rf /`
+不放行(rm 那一段过不了)。只读命令的路径参数必须落在项目目录内。
 
 它**不能覆盖** `permissions.deny` / `ask` 规则(deny/ask 优先),所以不会削弱
-已有的安全规则。安装器会逐条打印放进白名单的命令供你核对。
+已有的安全规则。安装器会逐条打印放进白名单的命令供你核对;复合命令按段拆开
+逐段收,只要有一段不安全,整条都不收。
 
-### 1. 被拒了怎么办
+### 1. auto 模式契约(不切模式也能把活干完)
 
-第一次跑脚本被拒 → 本会话处在受限环境。按顺序:
+auto 模式的「要不要问用户」在**服务端**判定;代理端点不透传那个调用 → 不可达 →
+**所有轮到它判断的命令一律硬拒**(auto 模式没有「退回去问用户」的路径)。
+本地唯一能放行的通道是**上面那个 PreToolUse hook** —— 所以整个技能的工作流
+必须按「只依赖本地可判定的动作」来设计。
+
+**契约的四条**(违反了才会被拒,所以是硬约束):
+
+1. **规范是白名单的来源**。每个 Task 的「验证命令」必须能进白名单 ——
+   `validate_specs.py` 现在会查(报「验证命令在 auto 模式下跑不了」),
+   写规范时就要避开:重定向(`> >> <`)、后台运行(`&`)、命令替换(`$( )` /
+   反引号)、shell 与解释器(`sh` / `bash` / `cmd` / `node` / `npx` …)、
+   任意 python(`python -c` / `python -m 任意模块`)。
+2. **Phase 0 装 hook 时带 `--feature <feature>`**,把当前 feature 的验证命令
+   一次性登记进项目白名单(安装器会把复合命令按段拆开逐段收)。
+3. **命令被拒时不要立刻问用户,先自己走完本地通道**:
+   1. `python ${CLAUDE_SKILL_DIR}/scripts/hook_probe.py "<原命令>"`
+      → 看 `allowed` 是 true 还是 false(它只判定,不执行命令)。
+   2. `allowed=false`、而这条命令**出现在规范里**(就是某个 Task 的验证命令)
+      → 登记后重试,不用切模式:
+      `python ${CLAUDE_SKILL_DIR}/scripts/install_hook.py --root . --extra "<原命令>"`
+      (安装器本身就在白名单里,而且会逐条打印它登记了什么)。
+   3. `allowed=false`、而这条命令**不在规范里** → 问用户(见下面的降级流程)。
+4. **联网检索走 MCP,不要用 WebFetch / WebSearch** —— 那两个工具在 auto 模式下
+   也要服务端分类器,必然被拒;具体的 MCP 工具(如 `mcp__MiniMax__web_search`)
+   走的是白名单里的精确规则,不受「宽泛规则被丢弃」那条策略影响。
+
+### 1.1 降级流程(登记与问用户都解决不了时)
+
+**任何**命令被拒 —— 不只是验证命令,调查/运维命令被拒同样适用 —— 尤其看到
+`Auto mode is unavailable: its safety check does not run for this session`
+这条报错时,说明本会话处在受限环境(服务端安全分类器不可达)。按顺序:
 
 1. **不重试**。
-2. **用 AskUserQuestion 问用户**——不要只在正文里贴命令。问题里必须带:
-   **命令原文** + **这条命令要干什么** + **被拒的原因**。三个选项:
+2. 先按上面「契约」第 3 条走一遍本地通道(探针 → 登记 → 重试)。
+3. 还是不行 → **用 AskUserQuestion 问用户**——不要只在正文里贴命令。问题里
+   必须带:**命令原文** + **这条命令要干什么** + **被拒的原因**。三个选项:
 
    | 选项 | 用户做什么 | AI 接着做什么 |
    |---|---|---|
@@ -277,7 +315,7 @@ git push/reset/clean 与任何改变 git 行为的前置选项(`-c` 能定义 al
      持续性问题",引导到后两个选项。
    - **AI 不得声称"已授予权限"**——AskUserQuestion 不改权限引擎,auto 模式下
      没有这条通道。
-3. **继续本阶段其余工作**,把跑不了的命令记进阶段小结的「待人工执行的命令」清单。
+4. **继续本阶段其余工作**,把跑不了的命令记进阶段小结的「待人工执行的命令」清单。
 
 ### 2. 硬依赖:Phase 4 的验证命令
 
@@ -319,6 +357,8 @@ Phase 4 每个 Task 的「验证命令」是闭环的前提,**跑不了就停在
 - `verify_acceptance.py --feature <feature>` —— 验收报告行为自检:防止漏验却宣布通过
 - `export_openspec.py --feature <feature>` —— 把规范导出为 OpenSpec 目录结构(生态互操作)
 - `install_hook.py --root . [--feature <feature>]` —— 装 PreToolUse hook(auto 模式下让 bash 可用)
+- `hook_probe.py "<命令>"` —— 问 hook「这条命令会不会被放行」,输出 JSON;
+  命令被拒却看不出原因时用它定位(`--list` 打印当前白名单)
 
 脚本用 Python 3 标准库实现,无第三方依赖。命令按 `python ${CLAUDE_SKILL_DIR}/scripts/<脚本名>` 调用;
 环境里是 `python3` 或 `py` 时替换即可。
@@ -326,6 +366,10 @@ Phase 4 每个 Task 的「验证命令」是闭环的前提,**跑不了就停在
 **hooks/**
 - `sdd_bash_allow.py` —— PreToolUse hook:放行 SDD 自己的脚本、git 安全子命令、常见测试命令
 - `sdd-hook-allow.json` —— hook 的可编辑白名单(装到项目的 `.claude/hooks/` 下)
+
+> 命令被拒、但看不出为什么时,先跑 `hook_probe.py "<原命令>"` 看结论 ——
+> 它输出 `{"allowed": false, "reason": null}` 就说明没命中白名单,
+> 把它写进 `.claude/hooks/sdd-hook-allow.json` 的 `extra` 即可(危险命令除外)。
 
 ## 收尾:注入 CLAUDE.md
 
