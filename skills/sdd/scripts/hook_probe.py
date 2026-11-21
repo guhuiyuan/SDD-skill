@@ -11,6 +11,8 @@ auto 模式下服务端分类器不可达时,命令被拒了却看不出**为什
     python hook_probe.py "git status && rm -rf /"
     python hook_probe.py                 # 从 stdin 读一条命令
     python hook_probe.py --list          # 打印当前生效的白名单
+    python hook_probe.py --hook <路径>    # 问**别的项目**里装的那份 hook
+                                       # (白名单跟着那个项目走)
 
 输出是 JSON:
 
@@ -33,18 +35,35 @@ for _stream in ('stdout', 'stderr'):
 
 HOOK_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                         'hooks')
-if HOOK_DIR not in sys.path:
-    sys.path.insert(0, HOOK_DIR)
 
-try:
-    import sdd_bash_allow as hook
-except Exception as exc:  # pragma: no cover
-    sys.stderr.write('导入 hook 失败: %s\n' % exc)
-    sys.exit(1)
+
+def load_hook(path=None):
+    """导入 hook 模块;``path`` 给了就用那一份(别的项目里装的)。"""
+    if path:
+        directory = os.path.dirname(os.path.abspath(path))
+        if directory not in sys.path:
+            sys.path.insert(0, directory)
+    elif HOOK_DIR not in sys.path:
+        sys.path.insert(0, HOOK_DIR)
+    import sdd_bash_allow
+    return sdd_bash_allow
 
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    hook_path = None
+    if '--hook' in argv:
+        i = argv.index('--hook')
+        if i + 1 >= len(argv):
+            sys.stderr.write('--hook 后面要给路径\n')
+            return 2
+        hook_path = argv[i + 1]
+        del argv[i:i + 2]
+    try:
+        hook = load_hook(hook_path)
+    except Exception as exc:  # pragma: no cover
+        sys.stderr.write('导入 hook 失败: %s\n' % exc)
+        return 1
     if '--list' in argv:
         extra, tools, write_paths = hook.load_allowlist()
         print(json.dumps({'extra': extra, 'tools': tools,

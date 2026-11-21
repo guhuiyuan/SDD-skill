@@ -1370,6 +1370,39 @@ def test_hook_and_installer(tmp):
     check('洞⑬ 固定文件名的技能脚本照常放行',
           hit('python skills/sdd/scripts/validate_specs.py --feature x'))
 
+    # --- 技能脚本的可信判定(目录联接 realpath 越界的那次误伤)---
+    home_skill = hook.logical_path(os.path.join(
+        os.path.expanduser('~'), '.claude', 'skills', 'sdd', 'scripts',
+        'install_hook.py'))
+    check('~/.claude 下的技能脚本可信(联接不该被误伤)',
+          hook.script_trusted(home_skill) is True, home_skill)
+    check('项目里的陌生 skills/sdd/scripts 不可信',
+          hook.script_trusted(hook.logical_path(
+              os.path.join(tmp, 'skills', 'sdd', 'scripts', 'x.py'))) is False)
+    check('空路径不可信', hook.script_trusted('') is False)
+
+    # --- 只读命令的边界:sed / 透明包装器 ---
+    check('放行只读的 sed', hit('sed -n "1,10p" README.md'))
+    check('不放行 sed -i(会就地改文件)',
+          not hit('sed -i "s/a/b/" README.md'))
+    # 模式类选项后面的参数是表达式,不是路径(Python 3.13 起 '/x' 算绝对路径)
+    check('放行 sed 的地址表达式(以 / 开头)',
+          hit("sed -n '/### 2.2/,/### 2.3/p' README.md"))
+    check('不放行 项目外的绝对路径读取', not hit('cat /etc/passwd'))
+    check('放行 time 包着的白名单命令',
+          hit('time python -m pytest tests/test_x.py'))
+    check('不放行 time 包着的危险命令', not hit('time rm -rf /'))
+    check('放行 timeout 300 包着的白名单命令',
+          hit('timeout 300 python -m pytest tests/test_x.py'))
+    check('放行 python --version', hit('python --version'))
+    check('放行读自己的会话日志(工作流 journal)',
+          hook.evaluate('tail -4 "%s"' % os.path.join(
+              hook.session_transcript_dir(), 'subagents', 'workflows',
+              'wf_x', 'journal.jsonl')) is not None)
+    check('不放行读别的项目的会话日志',
+          hook.evaluate('tail -4 "C:/Users/ghy/.claude/projects/other-proj/x.jsonl"')
+          is None)
+
     # --- hook_probe.py:让用户能直接问「这条命令会不会被放行」---
     code, out = run('hook_probe.py', 'git status')
     try:
