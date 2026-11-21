@@ -23,8 +23,9 @@
 6. **任何**命令若因权限被拒（尤其报 `Auto mode is unavailable: its safety check
    does not run for this session`），**不要重试、也不要把错误原样报出来就放弃**。
    先走本地通道，再问用户：
-   ① `python <技能目录>/scripts/hook_probe.py "<原命令>"` 看结论；
-   ② 若 `allowed=false` 且这条命令**出现在本规范里**（某个 Task 的验证命令）→
+   ① `python <技能目录>/scripts/hook_probe.py "<原命令>"` 看结论（只判定，不执行）；
+   ② 若 `allowed=false` 且这条命令**出现在本规范里**（某个 Task 的验证命令，
+   或「常用命令」小节里）→
    `python <技能目录>/scripts/install_hook.py --root . --extra "<原命令>"`
    登记后重试（**不用切模式**）；
    ③ 仍不行（命令不在规范里）→ 用 AskUserQuestion 问用户怎么处理（切到非 auto
