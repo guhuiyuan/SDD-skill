@@ -809,6 +809,26 @@ def test_validate_specs(tmp):
     check('常用命令在 auto 模式下跑不了时报错',
           code != 0 and 'auto 模式' in out, out[-300:])
 
+    # 环境变量前缀:普通变量名可以带,危险的要报错
+    base = os.path.join(tmp, 'v_auto5')
+    d = make_project(base)
+    mutate(os.path.join(d, 'tasks.md'),
+           '- **验证命令**: `pytest tests/store/test_ticket_store.py`',
+           '- **验证命令**: `YUANWORK_GRAPH_DB=D:/data/store.db pytest '
+           'tests/store/test_ticket_store.py`')
+    code, out = run('validate_specs.py', '--feature', 'demo', '--root', base)
+    check('带普通环境变量前缀的验证命令不报错', code == 0, out[-300:])
+
+    base = os.path.join(tmp, 'v_auto6')
+    d = make_project(base)
+    mutate(os.path.join(d, 'tasks.md'),
+           '- **验证命令**: `pytest tests/store/test_ticket_store.py`',
+           '- **验证命令**: `PATH=/tmp/evil pytest '
+           'tests/store/test_ticket_store.py`')
+    code, out = run('validate_specs.py', '--feature', 'demo', '--root', base)
+    check('带危险环境变量前缀的验证命令报错',
+          code != 0 and '环境变量' in out, out[-300:])
+
     base = os.path.join(tmp, 'v9')
     d = make_project(base)
     mutate(os.path.join(d, 'tasks.md'),
@@ -1418,6 +1438,31 @@ def test_hook_and_installer(tmp):
     check('放行 timeout 10m 包着的白名单命令(时长带单位)',
           hit('timeout 10m python -m pytest tests/test_x.py'))
     check('放行 python --version', hit('python --version'))
+
+    # --- 环境变量前缀(VAR=value cmd)---
+    # 项目自己的验证命令常带环境变量(`YUANWORK_GRAPH_DB=… pytest …`),
+    # 之前整个形状放行不了 → agent 每次都撞墙。
+    check('放行带普通环境变量前缀的命令', hit('PYTHONUTF8=1 python --version'))
+    check('放行带环境变量前缀的只读命令', hit('FOO=1 ls'))
+    check('放行环境变量前缀叠在透明包装器上',
+          hit('FOO=1 timeout 300 python --version'))
+    check('不放行 PATH 前缀(能换掉命令查找路径)',
+          not hit('PATH=/tmp/evil ls'))
+    check('不放行 LD_PRELOAD 前缀(能往进程里注入代码)',
+          not hit('LD_PRELOAD=/tmp/x.so ls'))
+    check('不放行 GIT_DIR 前缀(能让 git 写到别的仓库)',
+          not hit('GIT_DIR=/other/repo git status'))
+    check('不放行 HOME 前缀(让程序去别处找凭据)',
+          not hit('HOME=/tmp ls'))
+    check('不放行没登记过的带前缀命令',
+          not hit('FOO=1 .venv/Scripts/python.exe -m pytest tests/x.py -q'))
+    check('登记过的带前缀命令,变量值不同也算同一条',
+          hook.evaluate(
+              'YUANWORK_GRAPH_DB=D:/other/store.db '
+              '.venv/Scripts/python.exe -m pytest tests/x.py -q',
+              extra=['YUANWORK_GRAPH_DB=D:/yuanwork/data/store.db '
+                     '.venv/Scripts/python.exe -m pytest tests/x.py -q'])
+          is not None)
     check('放行读自己的会话日志(工作流 journal)',
           hook.evaluate('tail -4 "%s"' % os.path.join(
               hook.transcript_dir(), 'subagents', 'workflows',
@@ -1452,6 +1497,23 @@ def test_hook_and_installer(tmp):
                 'vi a.txt', 'mktemp -d'):
         check('不放行 %s(即使写进白名单)' % cmd,
               hook.evaluate(cmd, extra=[cmd]) is None)
+
+    # --- 白名单文件里的 JSON 笔误:末尾多一个逗号,不该让整份白名单作废 ---
+    broken = os.path.join(tmp, 'broken-allow.json')
+    with io.open(broken, 'w', encoding='utf-8', newline='\n') as fh:
+        fh.write('{\n  "extra": [\n    "pytest tests/test_x.py",\n  ],\n'
+                 '  "tools": [],\n  "write_paths": []\n}\n')
+    old_env = os.environ.get('SDD_HOOK_ALLOWLIST')
+    os.environ['SDD_HOOK_ALLOWLIST'] = broken
+    try:
+        extra, _tools, _paths = hook.load_allowlist()
+    finally:
+        if old_env is None:
+            os.environ.pop('SDD_HOOK_ALLOWLIST', None)
+        else:
+            os.environ['SDD_HOOK_ALLOWLIST'] = old_env
+    check('白名单末尾多一个逗号也能读出来(别让整份白名单作废)',
+          'pytest tests/test_x.py' in extra, json.dumps(extra, ensure_ascii=False)[:200])
 
     # --- hook_probe.py:让用户能直接问「这条命令会不会被放行」---
     code, out = run('hook_probe.py', 'git status')
@@ -1690,6 +1752,53 @@ def test_hook_and_installer(tmp):
     check('有一段危险时整条复合命令都不收',
           'pytest a.py' not in al5.get('extra', []),
           json.dumps(al5, ensure_ascii=False))
+
+    # ⑥ 环境变量前缀:普通变量名照常登记,危险的整条不收
+    base6 = os.path.join(tmp, 'envprefix')
+    os.makedirs(os.path.join(base6, 'specs', 'demo'), exist_ok=True)
+    with io.open(os.path.join(base6, 'specs', 'demo', 'tasks.md'),
+                 'w', encoding='utf-8', newline='\n') as fh:
+        fh.write('# 任务\n\n### TASK-001: 带环境变量的验证\n\n'
+                 '- **验证命令**: `YUANWORK_GRAPH_DB=D:/yuanwork/data/store.db '
+                 '.venv/Scripts/python.exe -m pytest tests/test_x.py -q`\n'
+                 '\n### TASK-002: 太松的写法\n\n'
+                 '- **验证命令**: `FOO=1 python`\n'
+                 '\n### TASK-003: 危险的环境变量\n\n'
+                 '- **验证命令**: `PATH=/tmp/evil .venv/Scripts/python.exe '
+                 '-m pytest tests/test_x.py -q`\n')
+    code, out = run('install_hook.py', '--root', base6, '--feature', 'demo')
+    with io.open(os.path.join(base6, '.claude', 'hooks', 'sdd-hook-allow.json'),
+                 encoding='utf-8') as fh:
+        al6 = json.load(fh)
+    check('带环境变量前缀的验证命令进白名单',
+          any(c.startswith('YUANWORK_GRAPH_DB=') for c in al6.get('extra', [])),
+          json.dumps(al6, ensure_ascii=False)[:400])
+    check('前缀后面的命令照样要过「模式太松」那一关',
+          hook.evaluate('FOO=1 python', extra=['FOO=1 python']) is None,
+          json.dumps(al6, ensure_ascii=False)[:200])
+    check('危险的环境变量前缀整条不收',
+          not any(c.startswith('PATH=') for c in al6.get('extra', [])),
+          json.dumps(al6, ensure_ascii=False)[:400])
+
+    # ⑦ 白名单文件里有 JSON 笔误(末尾多一个逗号)→ 顺手修好,别拒绝覆盖
+    base7 = os.path.join(tmp, 'brokenjson')
+    os.makedirs(os.path.join(base7, '.claude', 'hooks'), exist_ok=True)
+    broken_allow = os.path.join(base7, '.claude', 'hooks', 'sdd-hook-allow.json')
+    with io.open(broken_allow, 'w', encoding='utf-8', newline='\n') as fh:
+        fh.write('{\n  "extra": [\n    "pytest tests/test_x.py",\n  ],\n'
+                 '  "tools": [],\n  "write_paths": []\n}\n')
+    code, out = run('install_hook.py', '--root', base7)
+    check('白名单有 JSON 笔误时安装器不拒绝', code == 0, out[-300:])
+    with io.open(broken_allow, encoding='utf-8') as fh:
+        try:
+            fixed = json.load(fh)
+            parsed = True
+        except Exception:
+            fixed = {}
+            parsed = False
+    check('白名单的笔误被顺手修好', parsed and
+          'pytest tests/test_x.py' in fixed.get('extra', []),
+          json.dumps(fixed, ensure_ascii=False)[:200])
 
     # ④ --root 指向不存在的目录要友好报错,而不是把整条目录树建出来
     code, out = run('install_hook.py', '--root', os.path.join(tmp, 'no-such-dir-xyz'))

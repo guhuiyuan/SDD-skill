@@ -234,8 +234,9 @@ MultiEdit / NotebookEdit),以及**派发子 agent**(Agent / Task)。
   执行),`sed -i` 更是就地改文件;要在项目里看文件用 Read / Grep 工具
 - 只读命令里**带环境变量**的(`echo $API_KEY`、`basename $PATH`)—— 变量的**值**
   会被原样打进 transcript;`env` / `printenv` 同样不在白名单里
-- **环境变量前缀**(`PYTHONUTF8=1 pytest`)—— 前缀能换掉命令查找路径
-  (`PATH=…`)或注入代码(`LD_PRELOAD=…`);要用就用命令自己的选项(`python -X utf8`)
+- **危险的环境变量前缀**(`PATH=… pytest` / `LD_PRELOAD=…` / `GIT_DIR=…` / `HOME=…`)
+  —— 它们能换掉命令查找路径、往进程里注入代码、让 git 写到别的仓库;
+  普通变量名(`PYTHONUTF8=1`、`YUANWORK_GRAPH_DB=…`)照常放行
 - 太松的白名单模式(例如白名单里只写一条 `python` 或一条 `sh`)
 - **文件重定向**(`>` `>>` `<`)—— 能写文件
 - **后台运行**(单个 `&`)—— 脱离监督

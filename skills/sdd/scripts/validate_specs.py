@@ -384,6 +384,13 @@ def auto_mode_blockers(cmd):
     for tokens, raw in zip(segments, raws):
         if not tokens or tokens[0].lower() == 'cd':
             continue
+        # 环境变量前缀:普通变量名可以带(PYTHONUTF8 / YUANWORK_GRAPH_DB 之类),
+        # 但 PATH / LD_* / GIT_* 这类会换掉命令查找路径或注入代码的不能带。
+        env_names, _rest = hook.split_env_prefix(tokens)
+        if env_names is None:
+            reasons.append('「%s」带了危险的环境变量前缀(PATH / LD_* / GIT_* '
+                           '这类会换掉命令查找路径或注入代码)' % raw)
+            continue
         if hook.pattern_is_loose(raw):
             reasons.append('「%s」放不进白名单:危险可执行文件 / shell 与解释器 / '
                            '模式太松(如只写一条 python)' % raw)

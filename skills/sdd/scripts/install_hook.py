@@ -138,23 +138,49 @@ def write_json(path, data):
         fh.write('\n')
 
 
+#: 这次安装里被「顺手修好」的文件(JSON 笔误,比如末尾多一个逗号)
+REPAIRED_FILES = []
+
+
 def load_json(path, default):
     if not os.path.isfile(path):
         return default, False
-    try:
-        with open(path, 'r', encoding='utf-8') as fh:
-            data = json.load(fh)
-    except Exception:
-        return default, False
+    data, repaired = _read_json_any(path)
+    if repaired and path not in REPAIRED_FILES:
+        REPAIRED_FILES.append(path)
     if not isinstance(data, type(default)):
         return default, False
     return data, True
+
+
+def _read_json_any(path):
+    """读 JSON;末尾多一个逗号这类笔误**顺手修好**。
+
+    返回 (数据, 是不是修过的)。修不好就返回 (None, False) ——
+    调用方按「解析失败」处理,拒绝覆盖。
+    """
+    hook = hook_module()
+    if hook is not None and hasattr(hook, 'load_json_lenient'):
+        data = hook.load_json_lenient(path)
+        if data is not None:
+            try:
+                with open(path, 'r', encoding='utf-8') as fh:
+                    json.load(fh)
+            except Exception:
+                return data, True       # 严格解析失败 → 是修好的
+            return data, False
+    try:
+        with open(path, 'r', encoding='utf-8') as fh:
+            return json.load(fh), False
+    except Exception:
+        return None, False
 
 
 def json_problem(path):
     """文件存在但不是合法 JSON 时返回错误说明,否则返回 None。
 
     这种情况下**拒绝覆盖** —— 用户/settings.json 里的东西不该被脚本悄悄抹掉。
+    (末尾多一个逗号这种笔误不算:能修好就修好,别把六十多条白名单作废。)
     """
     problem, _ = read_json_checked(path)
     return problem
@@ -167,12 +193,15 @@ def read_json_checked(path):
     """
     if not os.path.isfile(path):
         return None, None
+    data, _repaired = _read_json_any(path)
+    if data is not None:
+        return None, data
     try:
         with open(path, 'r', encoding='utf-8') as fh:
-            data = json.load(fh)
+            json.load(fh)
     except Exception as exc:
         return '%s 解析失败,拒绝覆盖: %s' % (path, exc), None
-    return None, data
+    return None, None
 
 
 def shape_problem(path, data, spec):
@@ -212,7 +241,14 @@ def split_command(cmd):
             continue
         if tokens[0].lower() == 'cd':
             continue
-        exe = os.path.basename(tokens[0]).lower()
+        # 环境变量前缀(`YUANWORK_GRAPH_DB=… pytest …`)是**项目自己的**写法:
+        # 危险的名字不放行,其余的照常登记(前缀本身会跟着进白名单)。
+        env_names, rest = hook.split_env_prefix(tokens)
+        if env_names is None:
+            return [], False
+        if not rest:
+            continue
+        exe = os.path.basename(rest[0]).lower()
         if exe.endswith('.exe'):
             exe = exe[:-4]
         if exe in hook.DENIED_EXECUTABLES:
@@ -314,6 +350,16 @@ def extract_verify_commands(tasks_text):
                 elif cmd not in skipped:
                     skipped.append(cmd)
                 continue
+            # 简单命令:按规范原文登记。但**环境变量前缀**要先看一眼 ——
+            # PATH / LD_* / GIT_* 这类会换掉命令查找路径或注入代码的,
+            # 登记进去也没用(hook 会拦),只会让人以为它能跑。
+            if hook is not None:
+                env_names, _rest = hook.split_env_prefix(
+                    hook.tokenize(cmd))
+                if env_names is None:
+                    if cmd not in skipped:
+                        skipped.append(cmd)
+                    continue
             if cmd not in out:
                 out.append(cmd)
     return out, skipped
@@ -548,6 +594,11 @@ def main(argv=None):
         print('  - %s' % a)
     print('  - 写入 %s' % allowlist_path)
     print('  - 写入 %s 的 hooks.PreToolUse' % settings_path)
+    if REPAIRED_FILES:
+        print('')
+        print('顺手修好了这几个文件里的 JSON 笔误(例如末尾多一个逗号):')
+        for path in REPAIRED_FILES:
+            print('  ~ %s' % path)
     print('')
     if added_cmds:
         print('放行的额外命令(逐条列出,你可以核对):')
