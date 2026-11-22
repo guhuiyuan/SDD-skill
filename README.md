@@ -230,6 +230,12 @@ MultiEdit / NotebookEdit),以及**派发子 agent**(Agent / Task)。
 - git push / reset / clean,以及任何会改变 git 行为的**前置选项**
   (`-c` 能定义 alias 把"安全子命令"换成任意 shell;`--exec-path` 能换掉子命令查找路径)
 - 任意 python(`python -c` / `python -m 任意模块`);解释器必须钉死脚本
+- `sed` —— 它的脚本里能藏 `w`(写文件)/ `r`(读文件)/ `e`(把模式空间交给 shell
+  执行),`sed -i` 更是就地改文件;要在项目里看文件用 Read / Grep 工具
+- 只读命令里**带环境变量**的(`echo $API_KEY`、`basename $PATH`)—— 变量的**值**
+  会被原样打进 transcript;`env` / `printenv` 同样不在白名单里
+- **环境变量前缀**(`PYTHONUTF8=1 pytest`)—— 前缀能换掉命令查找路径
+  (`PATH=…`)或注入代码(`LD_PRELOAD=…`);要用就用命令自己的选项(`python -X utf8`)
 - 太松的白名单模式(例如白名单里只写一条 `python` 或一条 `sh`)
 - **文件重定向**(`>` `>>` `<`)—— 能写文件
 - **后台运行**(单个 `&`)—— 脱离监督

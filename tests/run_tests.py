@@ -1382,26 +1382,51 @@ def test_hook_and_installer(tmp):
     check('空路径不可信', hook.script_trusted('') is False)
 
     # --- 只读命令的边界:sed / 透明包装器 ---
-    check('放行只读的 sed', hit('sed -n "1,10p" README.md'))
+    # sed 刻意**不在**只读表里:它的脚本能藏 w(写文件)/r(读文件)/e(交给 shell 执行),
+    # `sed -i` 更是就地改文件 —— 要在项目里看文件用 Read / Grep 工具。
+    check('不放行 sed(脚本里能藏 w / r / e)',
+          not hit('sed -n "1,10p" README.md'))
     check('不放行 sed -i(会就地改文件)',
           not hit('sed -i "s/a/b/" README.md'))
-    # 模式类选项后面的参数是表达式,不是路径(Python 3.13 起 '/x' 算绝对路径)
-    check('放行 sed 的地址表达式(以 / 开头)',
-          hit("sed -n '/### 2.2/,/### 2.3/p' README.md"))
+    check('不放行 sed -e w /tmp/x(sed 能写文件)',
+          not hit('sed -e "w /tmp/x" README.md'))
+    check('不放行 sed 的 r 命令(能读任意文件)',
+          not hit('sed "r /etc/passwd" README.md'))
+    # 模式类选项后面的参数是表达式,不是路径
+    check('放行 grep 的 -e 模式选项',
+          hit('grep -e "### 2.2" README.md'))
+    check('放行 grep 的布尔开关后面跟文件',
+          hit('grep -rn "TODO" README.md'))
+    check('不放行 sort -r /etc/passwd(布尔开关后面是文件,不是表达式)',
+          not hit('sort -r /etc/passwd'))
+    check('不放行 uniq ~/.ssh/id_rsa(uniq 也读文件)',
+          not hit('uniq ~/.ssh/id_rsa'))
+    check('不放行 tr 读项目外的文件', not hit('tr a b ~/.ssh/id_rsa'))
+    check('不放行 echo $API_KEY(会把环境变量的值打进 transcript)',
+          not hit('echo $API_KEY'))
+    check('不放行 echo $API_KEY.txt(变量后面接字符也是同一个洞)',
+          not hit('echo $API_KEY.txt'))
+    check('不放行 echo "${API_KEY}"', not hit('echo "${API_KEY}"'))
+    check('放行 echo 普通文本', hit('echo hello world'))
+    check('放行 echo $5(位置参数不是环境变量)', hit('echo $5'))
     check('不放行 项目外的绝对路径读取', not hit('cat /etc/passwd'))
     check('放行 time 包着的白名单命令',
           hit('time python -m pytest tests/test_x.py'))
     check('不放行 time 包着的危险命令', not hit('time rm -rf /'))
     check('放行 timeout 300 包着的白名单命令',
           hit('timeout 300 python -m pytest tests/test_x.py'))
+    check('放行 timeout 10m 包着的白名单命令(时长带单位)',
+          hit('timeout 10m python -m pytest tests/test_x.py'))
     check('放行 python --version', hit('python --version'))
     check('放行读自己的会话日志(工作流 journal)',
           hook.evaluate('tail -4 "%s"' % os.path.join(
-              hook.session_transcript_dir(), 'subagents', 'workflows',
+              hook.transcript_dir(), 'subagents', 'workflows',
               'wf_x', 'journal.jsonl')) is not None)
     check('不放行读别的项目的会话日志',
           hook.evaluate('tail -4 "C:/Users/ghy/.claude/projects/other-proj/x.jsonl"')
           is None)
+    check('不放行读 ~/.claude 下的非 transcript 文件',
+          hook.evaluate('cat "C:/Users/ghy/.claude/settings.json"') is None)
 
     # --- hook_probe.py:让用户能直接问「这条命令会不会被放行」---
     code, out = run('hook_probe.py', 'git status')
@@ -1426,6 +1451,23 @@ def test_hook_and_installer(tmp):
         probe = {}
     check('hook_probe --list 打出当前白名单',
           code == 0 and 'pytest' in (probe.get('extra') or []), out[-300:])
+    # 探别的项目时,「路径在不在项目内」的结论必须跟着那个项目走
+    inside = os.path.join(tmp, 'inside.txt')
+    io.open(inside, 'w', encoding='utf-8', newline='\n').write('x')
+    code, out = run('hook_probe.py', '--project', tmp, 'cat "%s"' % inside)
+    try:
+        probe = json.loads(out.strip())
+    except Exception:
+        probe = {}
+    check('hook_probe --project 把项目根切过去(项目内的文件放行)',
+          code == 0 and probe.get('allowed') is True, out[-300:])
+    code, out = run('hook_probe.py', 'cat "%s"' % inside)
+    try:
+        probe = json.loads(out.strip())
+    except Exception:
+        probe = {}
+    check('hook_probe 默认按当前目录的项目根判(项目外的文件不放行)',
+          code == 0 and probe.get('allowed') is False, out[-300:])
 
     # --- hook 的 stdout 形状(改坏 emit_allow 时测试必须能发现)---
     repo_root = os.path.dirname(os.path.dirname(SKILL))

@@ -13,6 +13,8 @@ auto 模式下服务端分类器不可达时,命令被拒了却看不出**为什
     python hook_probe.py --list          # 打印当前生效的白名单
     python hook_probe.py --hook <路径>    # 问**别的项目**里装的那份 hook
                                        # (白名单跟着那个项目走)
+    python hook_probe.py --project <目录> # 以那个目录当「项目根」判定
+                                       # (不给就从 --hook 的路径反推)
 
 输出是 JSON:
 
@@ -49,9 +51,20 @@ def load_hook(path=None):
     return sdd_bash_allow
 
 
+def infer_project(hook_path):
+    """从 hook 的路径反推它装在哪个项目里:``<项目>/.claude/hooks/x.py``。"""
+    if not hook_path:
+        return ''
+    hooks_dir = os.path.dirname(os.path.dirname(os.path.abspath(hook_path)))
+    if os.path.basename(hooks_dir).lower() == '.claude':
+        return os.path.dirname(hooks_dir)
+    return ''
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     hook_path = None
+    project = None
     if '--hook' in argv:
         i = argv.index('--hook')
         if i + 1 >= len(argv):
@@ -59,6 +72,19 @@ def main(argv=None):
             return 2
         hook_path = argv[i + 1]
         del argv[i:i + 2]
+    if '--project' in argv:
+        i = argv.index('--project')
+        if i + 1 >= len(argv):
+            sys.stderr.write('--project 后面要给目录\n')
+            return 2
+        project = argv[i + 1]
+        del argv[i:i + 2]
+    # 项目根决定「路径在不在项目内」这件事 —— 探别的项目时必须切过去,
+    # 否则同一个命令在两个项目里的结论会不一样。
+    if not project:
+        project = infer_project(hook_path)
+    if project:
+        os.environ['CLAUDE_PROJECT_DIR'] = os.path.abspath(project)
     try:
         hook = load_hook(hook_path)
     except Exception as exc:  # pragma: no cover

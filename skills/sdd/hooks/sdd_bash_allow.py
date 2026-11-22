@@ -84,10 +84,11 @@ auto 模式下「派发子 agent」这一步本身也要服务端分类器 → �
 ## 白名单(保守)
 
 1. SDD 技能自己的脚本:python 解释器 + 路径**整段**命中 ``skills/sdd/scripts/``
-   或 ``.claude/sdd/`` 的 ``.py`` 文件,**且**落在可信根(项目根 / 工作目录 /
-   ``~/.claude``)下 —— 子串比对会让 ``/tmp/evil/skills/sdd/scripts/x.py`` 蒙混过关;
-   而 ``skills/sdd/scripts/`` **只认固定文件名**(见 SDD_SCRIPT_NAMES)——
-   那个目录 AI 自己就能写,按目录信任等于给它一个「写个 .py 再执行」的口子
+   或 ``.claude/sdd/`` 的 ``.py`` 文件,**且**路径可信 —— 在 ``~/.claude`` 下面
+   (AI 写不到那里),或 ``.claude/sdd/`` 下,或在项目里但**与已安装的那份
+   逐字节相同**(``skills/sdd/scripts/`` AI 自己就能写,按目录信任等于给它一个
+   「写个 .py 再执行」的口子);子串比对会让 ``/tmp/evil/skills/sdd/scripts/x.py``
+   蒙混过关
 2. git 的安全子命令:status/diff/log/show/rev-parse/branch/add/commit
 3. 只读命令(ls/cat/head/grep/find/diff/…):单个跑本来就会被内建无害命令表
    放行,这里补的是**链式形态**里的它们
@@ -150,6 +151,7 @@ auto 模式下「派发子 agent」这一步本身也要服务端分类器 → �
 
 import json
 import os
+import re
 import sys
 
 ALLOWLIST_FILE = 'sdd-hook-allow.json'
@@ -274,8 +276,11 @@ READONLY_COMMANDS = frozenset({
     'diff', 'cmp', 'sort', 'uniq', 'cut', 'tr', 'basename', 'dirname', 'realpath',
     'stat', 'file', 'du', 'df', 'tree', 'which', 'type', 'whoami', 'date',
     'sleep', 'test', 'true', 'false', 'echo', 'find', 'md5sum', 'sha256sum',
-    'sed',
 })
+
+# **刻意不含 sed** —— 它的脚本里能藏 w(写文件)、r(读文件)、e(把模式空间
+# 交给 shell 执行)，那些都不是「只读」；`sed -i` 更是就地改文件。
+# 要在项目里看文件用 Read / Grep 工具，它们不走这条路。
 
 # 会**读文件**的只读命令 —— 它们的路径参数必须落在项目内,
 # 否则 `cat ~/.ssh/id_rsa` 这种读密钥的路径会被链式放行。
@@ -283,29 +288,33 @@ READONLY_COMMANDS = frozenset({
 READONLY_FILE_COMMANDS = frozenset({
     'cat', 'head', 'tail', 'wc', 'grep', 'egrep', 'fgrep', 'diff', 'cmp',
     'sort', 'stat', 'file', 'find', 'du', 'tree', 'cut', 'md5sum', 'sha256sum',
-    'ls', 'sed',
+    # uniq 与 tr 也**读文件**，dir 是 Windows 的 ls —— 少了它们，
+    # `uniq ~/.ssh/id_rsa` 就被放行：命令在只读表里，但路径参数没人查。
+    'ls', 'uniq', 'tr', 'dir',
 })
-
-# 只读命令里带这些参数就**不是**只读了 —— sed -i 会就地改文件
-READONLY_FORBIDDEN_FLAGS = {
-    'sed': ('-i', '--in-place'),
-}
 
 # 透明包装器:只影响计时/超时,不改命令语义 —— 剥掉之后按里面的命令判定
 # (实测 `time .venv/Scripts/python.exe -m pytest …` 因为多了个 time 被拒,
 #  而里面的 pytest 明明在白名单里)
 TRANSPARENT_PREFIXES = ('time', 'timeout')
 
+#: timeout 的时长参数(`300` / `10m` / `1.5s`)—— 不是命令,剥掉
+DURATION_RE = re.compile(r'^\d+(\.\d+)?[smhd]?$')
+
 # 这些选项后面的参数是「模式/表达式」,**不是文件路径** —— 不做路径判定。
 #
-# 实测:`sed -n '/### 2.2/,/### 2.3/p' file` 里的地址被当成了路径。而
-# Python 3.13 起 ntpath.isabs('/x') 为真(以斜杠开头即绝对路径)→ 那个地址
-# 被解析到当前盘根 → 判定成项目外 → 整条命令被拒。
-PATTERN_VALUE_OPTIONS = frozenset({
-    '-n', '-e', '--expression', '-m', '--mode', '-r', '--regexp',
-    '-F', '-P', '-E', '-G', '--include', '--exclude',
-    '--include-dir', '--exclude-dir', '-w', '-x',
-})
+# **按命令分,而且只收真正取值的选项**。踩过的坑:曾经用一张全局名单,
+# 里面混着布尔开关(-r / -n)。`sort -r /etc/passwd` 的文件操作数因此被
+# 当成「模式」跳过路径判定 → 只读命令能读项目外的文件(含私钥)。
+# 布尔开关后面跟的是文件,不是表达式。
+PATTERN_VALUE_OPTIONS = {
+    'grep': ('-e', '--regexp', '-m', '--include', '--exclude',
+             '--include-dir', '--exclude-dir'),
+    'egrep': ('-e', '--regexp', '-m', '--include', '--exclude',
+              '--include-dir', '--exclude-dir'),
+    'fgrep': ('-e', '--regexp', '-m', '--include', '--exclude',
+              '--include-dir', '--exclude-dir'),
+}
 
 # 带文件路径的工具 —— 放行与否只看路径,不看命令
 PATH_TOOLS = ('Write', 'Edit', 'MultiEdit', 'NotebookEdit')
@@ -631,12 +640,6 @@ def logical_path(path):
     return text.replace('\\', '/')
 
 
-def trusted_root_paths():
-    """可信根的原始路径(项目根 / 当前工作目录 / ~/.claude)。"""
-    return [p for p in (project_root(), os.getcwd(),
-                        os.path.join(os.path.expanduser('~'), '.claude')) if p]
-
-
 def trusted_dirs():
     """可以当作「项目内」的可信目录:项目根 + 当前工作目录。"""
     out = []
@@ -652,16 +655,35 @@ def has_denied_segment(path):
     return any(part in WRITE_DENY_DIRS for part in path.split('/'))
 
 
-def session_transcript_dir():
+def command_name(token: str) -> str:
+    """命令名(小写,去掉 .exe)。"""
+    name = os.path.basename(str(token or "")).lower()
+    return name[:-4] if name.endswith(".exe") else name
+
+
+def transcript_dir(root=None):
     """本项目会话 transcript 的目录(``~/.claude/projects/<项目键>/``)。
 
-    agent 要读自己的会话日志(工作流的 journal、子 agent 的 transcript)——
-    那是它自己的东西,但在项目目录之外 → 默认按「项目外」拒掉,得开个口子。
+    项目键的算法与 harness 一致:路径里的非字母数字字符一律换成 ``-``。
+    (实测 YuanWork → ``d--prep-for-work-Projects-YuanWork``。)
     """
-    root = project_root() or os.getcwd()
+    root = root or project_root() or os.getcwd()
     key = ''.join(ch if (ch.isalnum() or ch in '-_.') else '-'
                   for ch in os.path.abspath(root).replace('\\', '/'))
     return os.path.join(os.path.expanduser('~'), '.claude', 'projects', key)
+
+
+def is_own_transcript(target: str) -> bool:
+    """这个路径是不是本项目自己的会话日志(``*.jsonl``)。
+
+    agent 要读自己的会话日志(工作流的 journal、子 agent 的 transcript)——
+    那是它自己的东西,但在项目目录之外。只认本项目那一个目录里的 .jsonl:
+    开了这个口子的是「读自己的日志」,不是「读 ~/.claude 整棵树」。
+    """
+    if not target or not target.endswith(".jsonl"):
+        return False
+    transcripts = canon_path(transcript_dir())
+    return bool(transcripts) and within(transcripts, target)
 
 
 def expand_path_token(tok):
@@ -729,10 +751,7 @@ def path_args_inside(tokens, base=None):
     roots = trusted_dirs()
     if not roots:
         return False
-    # agent 自己的会话日志(工作流 journal、子 agent transcript)也允许读
-    transcripts = canon_path(session_transcript_dir())
-    if transcripts:
-        roots = roots + [transcripts]
+    value_options = PATTERN_VALUE_OPTIONS.get(command_name(tokens[0]), ())
     base_canon = canon_path(base_dir)
     if not base_canon or not any(within(r, base_canon) for r in roots):
         return False          # 已经离开项目 → 整段不放行
@@ -746,7 +765,8 @@ def path_args_inside(tokens, base=None):
                 continue
         else:
             # 紧跟在「模式类选项」后面的参数是表达式,不是路径
-            if idx >= 2 and tokens[idx - 1] in PATTERN_VALUE_OPTIONS:
+            # (名单按命令分 —— 见 PATTERN_VALUE_OPTIONS 那段注释)
+            if idx >= 2 and tokens[idx - 1] in value_options:
                 continue
         if not value:
             continue
@@ -779,11 +799,13 @@ def path_args_inside(tokens, base=None):
         if not target:
             return False      # 展开不出确定值 → 不放行
         if not any(within(r, target) for r in roots):
-            return False
-        if has_denied_segment(target):
-            # 会话日志目录本身在 ~/.claude 下面 —— 它是 agent 自己的东西
-            if not (transcripts and within(transcripts, target)):
-                return False      # .claude / .git
+            # agent 自己的会话日志(工作流 journal、子 agent transcript)
+            # 是它自己的东西 —— 但只认本项目的那几个 .jsonl,
+            # 不开 ~/.claude 整棵树的门。
+            if not is_own_transcript(target):
+                return False
+        if has_denied_segment(target) and not is_own_transcript(target):
+            return False      # .claude / .git
     return True
 
 
@@ -1110,6 +1132,28 @@ def evaluate_tool(tool_name, tool_input, tools=None, root=None, write_paths=None
     return None
 
 
+#: 这些只读命令的输出**就是它们的参数** —— 参数里有东西，输出里就有。
+PRINTS_ITS_ARGUMENT = frozenset({'echo', 'basename', 'dirname', 'realpath'})
+
+#: 参数里的**环境变量展开**。bash 会把变量的**值**替换进去,所以
+#: ``echo $API_KEY``、``echo $API_KEY.txt``、``echo "x${TOKEN}"`` 都会把
+#: 秘密打进 transcript。只认合法的标识符 —— ``$5`` / ``$?`` / ``$1`` 是
+#: 位置参数与状态码,不是环境变量,放过。
+VAR_REFERENCE = re.compile(
+    r'\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))'
+    r'|%([A-Za-z_][A-Za-z0-9_]*)%')
+
+
+def _expands_a_variable(token: str) -> bool:
+    """这个参数里有没有环境变量展开。"""
+    return bool(VAR_REFERENCE.search(str(token or '')))
+
+
+def _prints_an_expanded_variable(tokens) -> bool:
+    """参数里有没有环境变量展开(会被原样打印出来)。"""
+    return any(_expands_a_variable(tok) for tok in tokens[1:])
+
+
 def strip_transparent(tokens):
     """剥掉 ``time`` / ``timeout 300`` 这类包装器。
 
@@ -1120,14 +1164,10 @@ def strip_transparent(tokens):
         exe = os.path.basename(out[0]).lower()
         if exe.endswith('.exe'):
             exe = exe[:-4]
-        if exe == 'time':
+        if exe in TRANSPARENT_PREFIXES:
             out = out[1:]
-            continue
-        if exe == 'timeout':
-            rest = out[1:]
-            if rest and rest[0].isdigit():
-                rest = rest[1:]
-            out = rest
+            if exe == 'timeout' and out and DURATION_RE.match(out[0]):
+                out = out[1:]       # `timeout 300` / `timeout 10m` 的时长
             continue
         break
     return out
@@ -1151,10 +1191,11 @@ def evaluate_segment(tokens, extra, base=None, raw=None):
         exe = exe[:-4]
     if exe in DENIED_EXECUTABLES:
         return None
-    # 只读命令带了会改文件的参数(sed -i)→ 已经不是只读了
-    for flag in READONLY_FORBIDDEN_FLAGS.get(exe, ()):
-        if flag in tokens[1:]:
-            return None
+    # 只读命令**把参数原样打出来**时，不许打环境变量——
+    # env / printenv 之所以被排除，就是为了这个。`echo $API_KEY`
+    # 是同一件事绕了个弯。
+    if exe in PRINTS_ITS_ARGUMENT and _prints_an_expanded_variable(tokens):
+        return None
     # find 本身常用(找文件),但 -exec / -delete / -fprintf / -fls 能执行命令或写文件
     if exe == 'find' and any(tok in FIND_EXEC_FLAGS for tok in tokens[1:]):
         return None
@@ -1244,7 +1285,7 @@ def audit(reason):
         pass
 
 
-def main():
+def _decide():
     try:
         raw = sys.stdin.read()
     except Exception:
@@ -1276,6 +1317,21 @@ def main():
         emit_allow(reason)
         audit(reason)
     return 0
+
+
+def main():
+    """Decide, and never raise.
+
+    **Any exception must not escape** —— a hook that crashes leaves the
+    session with no gate at all; in auto mode (where the server-side
+    classifier is unreachable) that means every command gets denied.
+    So the whole thing is wrapped: on an exception it stays silent and
+    exits 0, and the normal permission flow takes over (fail-closed).
+    """
+    try:
+        return _decide()
+    except Exception:
+        return 0
 
 
 if __name__ == '__main__':
