@@ -15,6 +15,10 @@ auto 模式下服务端分类器不可达时,命令被拒了却看不出**为什
                                        # (白名单跟着那个项目走)
     python hook_probe.py --project <目录> # 以那个目录当「项目根」判定
                                        # (不给就从 --hook 的路径反推)
+    python hook_probe.py --debug "<命令>"  # 逐段打印判定,看是哪一段过不了
+
+默认探的是**项目里装的那份** hook(``<项目>/.claude/hooks/``)—— 白名单就装在它
+旁边;源码目录旁边没有白名单文件,拿源码判出来的结论是假的。
 
 输出是 JSON:
 
@@ -51,6 +55,19 @@ def load_hook(path=None):
     return sdd_bash_allow
 
 
+def default_hook_path():
+    """默认探**项目里装的那份** hook —— 白名单就装在它旁边。
+
+    源码目录(``skills/sdd/hooks/``)旁边没有 ``sdd-hook-allow.json``,
+    拿它来判会把「白名单里的命令」全判成不放行 —— 结论是假的。
+    """
+    project = os.environ.get('CLAUDE_PROJECT_DIR') or os.getcwd()
+    candidate = os.path.join(project, '.claude', 'hooks', 'sdd_bash_allow.py')
+    if os.path.isfile(candidate):
+        return candidate
+    return os.path.join(HOOK_DIR, 'sdd_bash_allow.py')
+
+
 def infer_project(hook_path):
     """从 hook 的路径反推它装在哪个项目里:``<项目>/.claude/hooks/x.py``。"""
     if not hook_path:
@@ -85,6 +102,8 @@ def main(argv=None):
         project = infer_project(hook_path)
     if project:
         os.environ['CLAUDE_PROJECT_DIR'] = os.path.abspath(project)
+    if not hook_path:
+        hook_path = default_hook_path()
     try:
         hook = load_hook(hook_path)
     except Exception as exc:  # pragma: no cover
@@ -97,14 +116,38 @@ def main(argv=None):
                          ensure_ascii=False, indent=2))
         return 0
 
+    debug = '--debug' in argv
+    if debug:
+        argv.remove('--debug')
     if argv:
         command = ' '.join(argv)
     else:
         command = sys.stdin.read()
 
     reason = hook.evaluate(command)
-    print(json.dumps({'command': command, 'allowed': bool(reason),
-                      'reason': reason}, ensure_ascii=False))
+    out = {'command': command, 'allowed': bool(reason), 'reason': reason}
+    if debug:
+        # 逐段打印判定 —— 「整条不放行」时能看出是哪一段过不了
+        extra, _tools, _paths = hook.load_allowlist()
+        segments, raws, writes, unterminated = hook.split_segments(command)
+        base = os.getcwd()
+        detail = []
+        for tokens, raw in zip(segments, raws):
+            if tokens and tokens[0].lower() == 'cd':
+                # 新旧两版 hook 的 resolve_dir 签名不同(旧版收一个目录参数)
+                if hasattr(hook, 'cd_target'):
+                    base = hook.resolve_dir(tokens[1:], base)
+                else:
+                    base = hook.resolve_dir(tokens[1] if len(tokens) > 1 else '',
+                                           base)
+                detail.append({'segment': raw, 'reason': 'cd -> %s' % (base or '?')})
+                continue
+            hit = hook.evaluate_segment(tokens, extra, base, raw)
+            detail.append({'segment': raw, 'reason': hit or '不放行'})
+        out['segments'] = detail
+        out['writes'] = writes
+        out['unterminated'] = unterminated
+    print(json.dumps(out, ensure_ascii=False))
     return 0
 
 

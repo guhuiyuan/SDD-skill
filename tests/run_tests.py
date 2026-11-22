@@ -1428,6 +1428,31 @@ def test_hook_and_installer(tmp):
     check('不放行读 ~/.claude 下的非 transcript 文件',
           hook.evaluate('cat "C:/Users/ghy/.claude/settings.json"') is None)
 
+    # --- cd 换到猜不出来的目录(base 停在项目根就会读到家目录的私钥)---
+    check('不放行 `cd && cat .ssh/id_rsa`(cd 回 $HOME)',
+          not hit('cd && cat .ssh/id_rsa'))
+    check('不放行 `cd - && cat .ssh/id_rsa`(cd 到 OLDPWD)',
+          not hit('cd - && cat .ssh/id_rsa'))
+    check('不放行 `cd -P ~ && cat .ssh/id_rsa`',
+          not hit('cd -P ~ && cat .ssh/id_rsa'))
+    check('不放行 `cd -- ~ && cat .ssh/id_rsa`',
+          not hit('cd -- ~ && cat .ssh/id_rsa'))
+    check('放行 cd 到项目内的目录', hit('cd specs && cat README.md'))
+
+    # --- 通配符也要挡 .claude / .git ---
+    check('不放行 cat .git/*', not hit('cat .git/*'))
+    check('不放行 ls .claude/*', not hit('ls .claude/*'))
+    check('放行 cat 通配符(项目内的普通文件)',
+          hit('cat specs/*.md'))
+
+    # --- 会写文件的命令:写进白名单也不放行 ---
+    for cmd in ('cp a.txt b.txt', 'mv a.txt b.txt', 'mkdir x',
+                'touch a.txt', 'tee a.txt', 'tar -xf x.tar',
+                'awk "BEGIN{print 1}"', 'sed "s/a/b/" a.txt',
+                'vi a.txt', 'mktemp -d'):
+        check('不放行 %s(即使写进白名单)' % cmd,
+              hook.evaluate(cmd, extra=[cmd]) is None)
+
     # --- hook_probe.py:让用户能直接问「这条命令会不会被放行」---
     code, out = run('hook_probe.py', 'git status')
     try:
